@@ -4,19 +4,17 @@ import asyncio
 import secrets
 import aiohttp
 import aiofiles
-import magic
+import traceback  # Error details ke liye import
 from urllib.parse import urlparse
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
 from config import Config
-# webserver se imports hata diye gaye hain, kyunki main.py unhe handle kar raha hai
-# from webserver import app, multi_clients, work_loads 
 
-# In-memory dictionary to share bot clients and workloads
-multi_clients = {}
-work_loads = {}
+# webserver se import ki zaroorat nahi, main.py se handle hoga
+# in-memory dictionaries ko webserver.py mein hi rehne do, wahan se access honge
+from webserver import multi_clients, work_loads
 
 # --- Bot Initialization ---
 bot = Client(
@@ -26,6 +24,7 @@ bot = Client(
     bot_token=Config.BOT_TOKEN,
     workers=100
 )
+
 
 # --- Multi-Client Initialization ---
 class TokenParser:
@@ -37,6 +36,7 @@ class TokenParser:
                 filter(lambda n: n[0].startswith("MULTI_TOKEN"), sorted(os.environ.items()))
             )
         }
+
 
 async def start_client(client_id, bot_token):
     try:
@@ -50,29 +50,31 @@ async def start_client(client_id, bot_token):
         print(f"Client {client_id} started successfully.")
     except FloodWait as e:
         print(f"FloodWait for Client {client_id}. Waiting for {e.value} seconds...")
-        await asyncio.sleep(e.value + 5) # Adding 5 extra seconds
-        await start_client(client_id, bot_token) # Retry starting
+        await asyncio.sleep(e.value + 5)  # Adding 5 extra seconds
+        await start_client(client_id, bot_token)  # Retry starting
     except Exception as e:
         print(f"!!! CRITICAL ERROR: Failed to start Client {client_id} - Error: {e}")
+
 
 async def initialize_clients(main_bot_instance):
     multi_clients[0] = main_bot_instance
     work_loads[0] = 0
-    
+
     all_tokens = TokenParser.parse_from_env()
     if not all_tokens:
         print("No additional clients found. Using default bot only.")
         return
-    
+
     print(f"Found {len(all_tokens)} extra clients. Starting them one by one with a delay.")
     for i, token in all_tokens.items():
         await start_client(i, token)
-        await asyncio.sleep(10) # 10 second gap between starting each bot
+        await asyncio.sleep(10)  # 10 second gap between starting each bot
 
     if len(multi_clients) > 1:
         print(f"Multi-Client Mode Enabled. Total Clients: {len(multi_clients)}")
     else:
         print("Single Client Mode.")
+
 
 # --- Helper Functions ---
 def get_readable_file_size(size_in_bytes):
@@ -83,68 +85,95 @@ def get_readable_file_size(size_in_bytes):
         size_in_bytes /= power; n += 1
     return f"{size_in_bytes:.2f} {power_labels[n]}B"
 
+
 async def edit_message_with_retry(message, text):
     try:
         await message.edit_text(text)
     except FloodWait as e:
         print(f"FloodWait received while editing message. Waiting for {e.value} seconds.")
-        await asyncio.sleep(e.value + 5) # Adding 5 extra seconds
+        await asyncio.sleep(e.value + 5)  # Adding 5 extra seconds
         await message.edit_text(text)
     except Exception as e:
         print(f"Error editing message: {e}")
 
-# --- Bot Handlers with Debugging ---
+
+# --- Bot Handlers with SUPER Debugging ---
+
 print("Bot script loaded. Handlers are being registered...")
+
+# YEH NAYA FUNCTION HAR MESSAGE KO CHECK KAREGA
+@bot.on_message(filters.private, group=-1) # group=-1 ensures this runs first
+async def catch_all_private_messages(client, message: Message):
+    """Yeh function har private message ko log karega, command ho ya file."""
+    try:
+        await bot.send_message(
+            chat_id=Config.LOG_CHANNEL,
+            text=(
+                f"**[DEBUG] Received Message**\n\n"
+                f"**From User ID:** `{message.from_user.id}`\n"
+                f"**Message Type:** `{message.media or 'TEXT'}`\n"
+                f"**Content:**\n`{message.text or message.caption or 'No Text'}`"
+            )
+        )
+    except Exception as e:
+        # Agar log channel mein hi message nahi jaa raha, toh print karo
+        print(f"!!! CRITICAL: Could not send log to LOG_CHANNEL. Check channel ID and bot permissions. Error: {e}")
+
+    # Iske baad, Pyrogram doosre handlers (jaise /start, file_handler) ko check karega
+    message.continue_propagation()
+
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
-    print(f"[DEBUG] Received /start command from user: {message.from_user.id}")
     try:
         await message.reply_text("Hello! Send me a file or a direct download URL to get a shareable link.")
-        print(f"[DEBUG] Replied to /start command successfully.")
     except Exception as e:
-        print(f"!!! ERROR replying to /start: {e}")
+        # Agar reply fail ho, toh log channel mein error bhejo
+        error_trace = traceback.format_exc()
+        print(f"!!! ERROR in /start command: {e}\n{error_trace}")
+        await bot.send_message(
+            chat_id=Config.LOG_CHANNEL,
+            text=f"**ERROR in /start command!**\n\n**User ID:** `{message.from_user.id}`\n\n**Error:**\n`{e}`\n\n**Traceback:**\n`{error_trace}`"
+        )
 
 
 async def handle_file_upload(message: Message, user_id: int):
-    print(f"[DEBUG] Handling file from user: {user_id}. Original Message ID: {message.id}")
     try:
-        print(f"[DEBUG] Attempting to copy file to STORAGE_CHANNEL ({Config.STORAGE_CHANNEL})...")
         sent_message = await message.copy(chat_id=Config.STORAGE_CHANNEL)
-        print(f"[DEBUG] File successfully copied. New Message ID in storage: {sent_message.id}")
-        
         unique_id = secrets.token_urlsafe(8)
         show_link = f"{Config.BASE_URL}/show/{unique_id}"
-        
+
         log_text = (
-            f"**New File Shared**\n\n"
+            f"**File Processed Successfully**\n\n"
             f"**User:** `{user_id}`\n"
             f"**Original Msg ID:** `{message.id}`\n"
             f"**Storage Msg ID:** `{sent_message.id}`\n"
             f"**Unique ID:** `{unique_id}`\n"
             f"**Link:** {show_link}"
         )
-        print(f"[DEBUG] Sending log message to LOG_CHANNEL ({Config.LOG_CHANNEL})...")
         await bot.send_message(Config.LOG_CHANNEL, log_text)
-        print(f"[DEBUG] Log message sent.")
-        
+
         await message.reply_text(f"Here is your shareable link:\n`{show_link}`", quote=True)
-        print(f"[DEBUG] Sent shareable link to user {user_id}.")
+
     except Exception as e:
-        print(f"!!! ERROR in handle_file_upload: {e}")
-        try:
-            await message.reply_text(f"Something went wrong while processing your file. Please check logs.\nError: {e}")
-        except Exception as reply_e:
-            print(f"!!! CRITICAL ERROR: Could not even reply to user about the error. Reply Error: {reply_e}")
+        error_trace = traceback.format_exc()
+        print(f"!!! ERROR in handle_file_upload: {e}\n{error_trace}")
+        await bot.send_message(
+            chat_id=Config.LOG_CHANNEL,
+            text=f"**ERROR handling file!**\n\n**User ID:** `{user_id}`\n\n**Error:**\n`{e}`\n\n**Traceback:**\n`{error_trace}`"
+        )
+        await message.reply_text("Sorry, something went wrong. The developer has been notified.")
+
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def file_handler(client, message: Message):
     await handle_file_upload(message, message.from_user.id)
 
+
 @bot.on_message(filters.command("url") & filters.private)
 async def url_upload_handler(client, message: Message):
     if len(message.command) < 2:
-        await message.reply_text("Usage: `/url <direct_download_url>"); return
+        await message.reply_text("Usage: `/url <direct_download_url>`"); return
 
     url = message.command[1]
     file_name = os.path.basename(urlparse(url).path) or f"file_{int(time.time())}"
@@ -155,7 +184,6 @@ async def url_upload_handler(client, message: Message):
     last_edit_time = 0
 
     try:
-        print(f"[DEBUG] Starting download from URL: {url}")
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=None) as resp:
                 if resp.status != 200:
@@ -170,13 +198,13 @@ async def url_upload_handler(client, message: Message):
                         if current_time - last_edit_time > 2:
                             last_edit_time = current_time
                             await edit_message_with_retry(status_msg, f"**Downloading...**\n`{get_readable_file_size(downloaded_size)}` of `{get_readable_file_size(total_size)}`")
-        print(f"[DEBUG] Download completed. File saved at: {file_path}")
     except Exception as e:
-        print(f"!!! ERROR during download from URL: {e}")
+        error_trace = traceback.format_exc()
+        print(f"!!! ERROR during download from URL: {e}\n{error_trace}")
         await status_msg.edit_text(f"Download Error: {e}")
         if os.path.exists(file_path): os.remove(file_path)
         return
-    
+
     last_edit_time = 0
     async def progress(current, total):
         nonlocal last_edit_time
@@ -186,11 +214,10 @@ async def url_upload_handler(client, message: Message):
             await edit_message_with_retry(status_msg, f"**Uploading...**\n`{get_readable_file_size(current)}` of `{get_readable_file_size(total)}`")
 
     try:
-        print(f"[DEBUG] Uploading file to STORAGE_CHANNEL...")
         sent_message = await client.send_document(chat_id=Config.STORAGE_CHANNEL, document=file_path, progress=progress)
-        print(f"[DEBUG] Upload to Telegram complete.")
     except Exception as e:
-        print(f"!!! ERROR during upload to Telegram: {e}")
+        error_trace = traceback.format_exc()
+        print(f"!!! ERROR during upload to Telegram: {e}\n{error_trace}")
         await status_msg.edit_text(f"Upload to Telegram failed: {e}")
         return
     finally:
