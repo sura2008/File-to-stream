@@ -1,24 +1,18 @@
-# Dockerfile (FINAL CLEANED UPDATED CODE)
-
 # Python ka ek halka-phulka official version use karo
 FROM python:3.10-slim
 
 # Kaam karne ke liye /app naam ka folder banao
 WORKDIR /app
 
-# Code copy karne se pehle, saari libraries install kar lo
-# Isse Docker build fast hota hai
+# Libraries install karo
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Ab baaki ka saara project code copy karo
+# Baaki ka saara project code copy karo
 COPY . .
 
-# 'sessions' folder banane ki ab zaroorat nahi hai
-# RUN mkdir sessions
+# 'start.sh' ki ab koi zaroorat nahi hai
 
-# start.sh ko run karne ki permission do
-RUN chmod +x start.sh
-
-# Jab container start ho, toh yeh command chalao
-CMD ["bash", "start.sh"]
+# Jab container start ho, toh seedhe Python script ko chalao
+# Yeh sabse direct aur reliable tareeka hai
+CMD ["python3", "main.py"]
