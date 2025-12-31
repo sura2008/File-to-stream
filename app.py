@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pyrogram.file_id import FileId
 from pyrogram import raw
 from pyrogram.session import Session, Auth
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 import math
 
 # Project ki dusri files se important cheezein import karo
@@ -80,6 +82,7 @@ async def lifespan(app: FastAPI):
     print("--- Lifespan: Shutdown poora hua. ---")
 
 app = FastAPI(lifespan=lifespan)
+templates = Jinja2Templates(directory="templates")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -273,6 +276,13 @@ async def health_check():
     This route provides a 200 OK response for uptime monitors.
     """
     return {"status": "ok", "message": "Server is healthy and running!"}
+
+@app.get("/show/{unique_id}", response_class=HTMLResponse)
+async def show_page(request: Request, unique_id: str):
+    return templates.TemplateResponse(
+        "show.html",
+        {"request": request}
+    )
 
 @app.get("/api/file/{unique_id}", response_class=JSONResponse)
 async def get_file_details_api(request: Request, unique_id: str):
