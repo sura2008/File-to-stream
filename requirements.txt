@@ -4,3 +4,6 @@ tgcrypto
 python-dotenv
 python-magic
 motor
+uvicorn
+jinja2
+requests
