@@ -1,4 +1,4 @@
-# app.py
+# app.py (FINAL FIXED VERSION)
 
 import os
 import asyncio
@@ -8,7 +8,7 @@ import uvicorn
 import re
 import logging
 import math
-import requests  # <-- CONNECTS TO HUGGING FACE
+import requests  # <-- Required for Hugging Face Handoff
 
 from contextlib import asynccontextmanager
 from pyrogram import Client, filters, enums
@@ -39,15 +39,6 @@ async def lifespan(app: FastAPI):
         print("Starting main Pyrogram bot...")
         await bot.start()
         
-        # --- CACHE REFRESH FIX (Prevents "ID not found" error) ---
-        print("Refreshing channel access cache...")
-        try:
-            async for dialog in bot.get_dialogs(): pass
-            print("✅ Cache refreshed successfully.")
-        except Exception as e:
-            print(f"⚠️ Error refreshing cache (non-fatal): {e}")
-        # ---------------------------------------------------------
-
         me = await bot.get_me()
         Config.BOT_USERNAME = me.username
         print(f"✅ Main Bot [@{Config.BOT_USERNAME}] started successfully.")
@@ -57,12 +48,16 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
+        # --- SAFE CHANNEL CHECK (Prevents Crash) ---
         print(f"Verifying storage channel ({Config.STORAGE_CHANNEL})...")
         try:
+            # We try to fetch the chat. If it fails (Peer Invalid), we CATCH the error 
+            # so the server doesn't crash.
             await bot.get_chat(Config.STORAGE_CHANNEL)
             print("✅ Storage channel accessible.")
         except Exception as e:
-            print(f"!!! CRITICAL: Bot cannot access Storage Channel: {e}")
+            print(f"!!! WARNING: Bot cannot access Storage Channel yet: {e}")
+            print("➡️ ACTION REQUIRED: Send a message to the channel or make it Public temporarily.")
 
         # Force Sub Check
         if Config.FORCE_SUB_CHANNEL:
@@ -72,7 +67,7 @@ async def lifespan(app: FastAPI):
                 print("!!! WARNING: Bot is not admin in Force Sub Channel.")
 
     except Exception:
-        print(f"!!! FATAL ERROR: {traceback.format_exc()}")
+        print(f"!!! FATAL ERROR during startup: {traceback.format_exc()}")
     
     yield
     
@@ -204,7 +199,7 @@ async def handle_file_upload(client: Client, message: Message):
         await message.reply_text("__✅ File Uploaded! Choose an option:__", reply_markup=buttons, quote=True)
     except Exception as e:
         print(f"Upload Error: {e}")
-        await message.reply_text("❌ Error saving file.")
+        await message.reply_text(f"❌ Error saving file: {e}")
 
 # =====================================================================================
 # --- HUGGING FACE HANDOFF HANDLER (THE NEW FEATURE) ---
@@ -271,6 +266,86 @@ async def ia_upload_handler(client, callback_query):
 # --- WEB SERVER (STREAMING ENGINE) ---
 # =====================================================================================
 
+@app.get("/")
+async def health():
+    return {"status": "ok", "message": "Render Bot is awake."}
+
+@app.get("/show/{unique_id}", response_class=HTMLResponse)
+async def show_page(request: Request, unique_id: str):
+    """Serve the HTML page."""
+    storage_msg_id = await db.get_link(unique_id)
+    if not storage_msg_id: raise HTTPException(404, "Link Expired")
+    
+    # Simple check to see if we can access the file
+    try:
+        # Attempt to get file info from channel
+        # We wrap this in try/except in case channel is inaccessible
+        msg = await multi_clients[0].get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
+        media = msg.document or msg.video or msg.audio
+        if not media: raise Exception
+    except:
+        # If bot can't see channel, page still loads but might fail on download if not fixed
+        pass
+        
+    # We might not have media info if the try block above failed, so handle safely
+    # If msg failed, we can't show real filename, but we can still show the page.
+    # Ideally, we need the file to stream.
+    
+    # Re-fetch strictly for context if possible, otherwise generic
+    file_name = "Secure File"
+    file_size = "Unknown"
+    is_media = False
+    
+    try:
+         if 'media' in locals() and media:
+            file_name = media.file_name or "file"
+            file_size = get_readable_file_size(media.file_size)
+            is_media = (media.mime_type or "").startswith(("video", "audio"))
+    except: pass
+
+    safe_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    
+    context = {
+        "request": request,
+        "file_name": file_name,
+        "file_size": file_size,
+        "is_media": is_media,
+        "direct_dl_link": f"{Config.BASE_URL}/dl/{storage_msg_id}/{safe_name}",
+    }
+    return templates.TemplateResponse("show.html", context)
+
+@app.get("/api/file/{unique_id}", response_class=JSONResponse)
+async def get_file_details_api(request: Request, unique_id: str):
+    """API Endpoint used by the frontend to get file details."""
+    message_id = await db.get_link(unique_id)
+    if not message_id:
+        raise HTTPException(status_code=404, detail="Link expired or invalid.")
+    
+    main_bot = multi_clients.get(0)
+    if not main_bot:
+        raise HTTPException(status_code=503, detail="Bot is not ready.")
+    
+    try:
+        message = await main_bot.get_messages(Config.STORAGE_CHANNEL, message_id)
+        media = message.document or message.video or message.audio
+        if not media: raise Exception
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found on Telegram (or Bot cannot see channel).")
+
+    file_name = media.file_name or "file"
+    safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    mime_type = media.mime_type or "application/octet-stream"
+    
+    response_data = {
+        "file_name": mask_filename(file_name),
+        "file_size": get_readable_file_size(media.file_size),
+        "is_media": mime_type.startswith(("video", "audio")),
+        "direct_dl_link": f"{Config.BASE_URL}/dl/{message_id}/{safe_file_name}",
+        "mx_player_link": f"intent:{Config.BASE_URL}/dl/{message_id}/{safe_file_name}#Intent;action=android.intent.action.VIEW;type={mime_type};end",
+        "vlc_player_link": f"intent:{Config.BASE_URL}/dl/{message_id}/{safe_file_name}#Intent;action=android.intent.action.VIEW;type={mime_type};package=org.videolan.vlc;end"
+    }
+    return response_data
+
 class ByteStreamer:
     """Handles fetching file chunks from Telegram."""
     def __init__(self, client: Client):
@@ -316,36 +391,6 @@ class ByteStreamer:
                 else: break
         finally:
             work_loads[index] -= 1
-
-@app.get("/")
-async def health():
-    return {"status": "ok", "message": "Render Bot is awake."}
-
-@app.get("/show/{unique_id}", response_class=HTMLResponse)
-async def show_page(request: Request, unique_id: str):
-    """Serve the HTML page."""
-    storage_msg_id = await db.get_link(unique_id)
-    if not storage_msg_id: raise HTTPException(404, "Link Expired")
-    
-    # Simple check to see if we can access the file
-    try:
-        msg = await multi_clients[0].get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
-        media = msg.document or msg.video or msg.audio
-        if not media: raise Exception
-    except:
-        raise HTTPException(404, "File Not Found")
-        
-    file_name = media.file_name or "file"
-    safe_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
-    
-    context = {
-        "request": request,
-        "file_name": file_name,
-        "file_size": get_readable_file_size(media.file_size),
-        "is_media": (media.mime_type or "").startswith(("video", "audio")),
-        "direct_dl_link": f"{Config.BASE_URL}/dl/{storage_msg_id}/{safe_name}",
-    }
-    return templates.TemplateResponse("show.html", context)
 
 @app.get("/dl/{mid}/{fname}")
 async def stream_media(request: Request, mid: int, fname: str):
@@ -399,3 +444,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
+    
