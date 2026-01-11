@@ -1,4 +1,4 @@
-# config.py (UPDATED)
+# config.py
 
 import os
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ class Config:
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     OWNER_ID = int(os.environ.get("OWNER_ID", 0))
     
+    # Storage Channel ID (Clean & Convert)
     _storage_channel_str = os.environ.get("STORAGE_CHANNEL")
     if _storage_channel_str:
         try: STORAGE_CHANNEL = int(_storage_channel_str)
@@ -19,16 +20,16 @@ class Config:
     
     BASE_URL = os.environ.get("BASE_URL", "").rstrip('/')
     DATABASE_URL = os.environ.get("DATABASE_URL", "")
-    REDIRECT_BLOGGER_URL = os.environ.get("REDIRECT_BLOGGER_URL", "")
-    BLOGGER_PAGE_URL = os.environ.get("BLOGGER_PAGE_URL", "")
     
-    # --- YAHAN BADLAV KIYA GAYA HAI ---
-    # Force Subscribe ke liye channel ID/username
+    # Force Subscribe Channel
     _fsub_channel_str = os.environ.get("FORCE_SUB_CHANNEL")
     if _fsub_channel_str:
         try: FORCE_SUB_CHANNEL = int(_fsub_channel_str)
         except ValueError: FORCE_SUB_CHANNEL = _fsub_channel_str
     else: FORCE_SUB_CHANNEL = 0
         
-    # Yeh bot ka username store karega (code isse automatic set karega)
+    # Hugging Face Worker URL (The "Employee" that uploads to Archive)
+    HF_WORKER_URL = os.environ.get("HF_WORKER_URL", "").rstrip('/')
+
     BOT_USERNAME = ""
+    
