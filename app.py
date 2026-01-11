@@ -1,4 +1,4 @@
-# app.py (FULL UPDATED VERSION WITH POLLING)
+# app.py (FINAL FIXED RENDER VERSION)
 
 import os
 import asyncio
@@ -26,7 +26,7 @@ from config import Config
 from database import db
 
 # =====================================================================================
-# --- BACKGROUND POLLING SERVICE (THE NEW FEATURE) ---
+# --- BACKGROUND POLLING SERVICE (FIXED LINK ISSUE) ---
 # =====================================================================================
 
 async def poll_huggingface_queue():
@@ -37,7 +37,7 @@ async def poll_huggingface_queue():
         print("⚠️ HF_WORKER_URL not set. Background polling disabled.")
         return
 
-    # ✅ Endpoints derived from your Config
+    # ✅ Endpoints
     POLL_URL = f"{Config.HF_WORKER_URL}/botmessages"
     DONE_URL = f"{Config.HF_WORKER_URL}/donebotmessages"
 
@@ -46,7 +46,6 @@ async def poll_huggingface_queue():
     while True:
         try:
             # 1. Check for Pending Messages
-            # We run requests in a thread to avoid blocking the streaming server
             response = await asyncio.to_thread(requests.get, POLL_URL, timeout=10)
 
             if response.status_code == 200:
@@ -59,27 +58,28 @@ async def poll_huggingface_queue():
 
                     for msg in messages:
                         try:
+                            # 🛠️ FIX: FORCE DOUBLE QUOTES FOR LINKS
+                            # Telegram sometimes ignores links with single quotes. We fix it here.
+                            clean_text = msg['text'].replace("href='", 'href="').replace("'>", '">')
+
                             # 2. Send Message via Telegram
                             await bot.send_message(
                                 chat_id=msg['chat_id'], 
-                                text=msg['text'], 
-                                parse_mode=enums.ParseMode.HTML
+                                text=clean_text, 
+                                parse_mode=enums.ParseMode.HTML,
+                                disable_web_page_preview=True  # Cleaner message
                             )
                             sent_ids.append(msg['id'])
                             await asyncio.sleep(0.5) # Anti-flood delay
                         except Exception as e:
                             print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
 
-                    # 3. Confirm Delivery to Hugging Face (Delete from Queue)
+                    # 3. Confirm Delivery (Delete from HF Queue)
                     if sent_ids:
                         payload = {"message_ids": sent_ids}
                         await asyncio.to_thread(requests.post, DONE_URL, json=payload, timeout=10)
                         print(f"✅ Confirmed {len(sent_ids)} messages sent.")
             
-            else:
-                # If HF is sleeping or erroring, just print briefly
-                pass
-
         except Exception as e:
             print(f"⚠️ Polling Error: {e}")
 
@@ -297,7 +297,6 @@ async def ia_upload_handler(client, callback_query):
         )
         
         # We send the upload request to HF
-        # IMPORTANT: This is just the TRIGGER. The actual notification will come via the Polling Service later.
         response = await asyncio.to_thread(requests.post, f"{Config.HF_WORKER_URL}/upload", json=payload, timeout=5)
         
         if response.status_code == 200:
@@ -481,4 +480,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
-                
+        
