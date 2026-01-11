@@ -1,4 +1,4 @@
-# app.py (FINAL FIXED RENDER VERSION)
+# app.py (RENDER VERSION - WITH URL SPACE FIXER)
 
 import os
 import asyncio
@@ -8,7 +8,7 @@ import uvicorn
 import re
 import logging
 import math
-import requests  # Required for polling
+import requests
 
 from contextlib import asynccontextmanager
 from pyrogram import Client, filters, enums
@@ -26,7 +26,7 @@ from config import Config
 from database import db
 
 # =====================================================================================
-# --- BACKGROUND POLLING SERVICE (FIXED LINK ISSUE) ---
+# --- BACKGROUND POLLING SERVICE (SMART LINK FIXER) ---
 # =====================================================================================
 
 async def poll_huggingface_queue():
@@ -37,7 +37,6 @@ async def poll_huggingface_queue():
         print("⚠️ HF_WORKER_URL not set. Background polling disabled.")
         return
 
-    # ✅ Endpoints
     POLL_URL = f"{Config.HF_WORKER_URL}/botmessages"
     DONE_URL = f"{Config.HF_WORKER_URL}/donebotmessages"
 
@@ -58,16 +57,28 @@ async def poll_huggingface_queue():
 
                     for msg in messages:
                         try:
-                            # 🛠️ FIX: FORCE DOUBLE QUOTES FOR LINKS
-                            # Telegram sometimes ignores links with single quotes. We fix it here.
-                            clean_text = msg['text'].replace("href='", 'href="').replace("'>", '">')
+                            # 🛠️ SMART FIX: Handle Spaces in URLs & Single Quotes
+                            # Telegram breaks links if the URL has spaces (e.g. "File Name.pdf").
+                            # This regex finds the URL, replaces spaces with %20, and ensures double quotes.
+                            
+                            def fix_link_match(match):
+                                url = match.group(1)
+                                # Encode spaces to %20
+                                clean_url = url.replace(" ", "%20")
+                                return f'href="{clean_url}"'
+
+                            # Finds pattern: href='...' and applies the fix
+                            clean_text = re.sub(r"href='(.*?)'", fix_link_match, msg['text'])
+                            
+                            # Also catch if HF sent double quotes but still has spaces
+                            clean_text = re.sub(r'href="(.*?)"', fix_link_match, clean_text)
 
                             # 2. Send Message via Telegram
                             await bot.send_message(
                                 chat_id=msg['chat_id'], 
                                 text=clean_text, 
                                 parse_mode=enums.ParseMode.HTML,
-                                disable_web_page_preview=True  # Cleaner message
+                                disable_web_page_preview=True
                             )
                             sent_ids.append(msg['id'])
                             await asyncio.sleep(0.5) # Anti-flood delay
@@ -113,18 +124,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(poll_huggingface_queue())
         
         # --- SAFE CHANNEL CHECK ---
-        print(f"Verifying storage channel ({Config.STORAGE_CHANNEL})...")
         try:
             await bot.get_chat(Config.STORAGE_CHANNEL)
-            print("✅ Storage channel accessible.")
-        except Exception as e:
-            print(f"!!! WARNING: Bot cannot access Storage Channel yet: {e}")
-
-        if Config.FORCE_SUB_CHANNEL:
-            try:
-                await bot.get_chat(Config.FORCE_SUB_CHANNEL)
-            except Exception:
-                print("!!! WARNING: Bot is not admin in Force Sub Channel.")
+        except Exception:
+            print("!!! WARNING: Bot cannot access Storage Channel yet.")
 
     except Exception:
         print(f"!!! FATAL ERROR during startup: {traceback.format_exc()}")
@@ -209,7 +212,7 @@ def mask_filename(name: str):
     return f"{base[:10]}...{ext}"
 
 # =====================================================================================
-# --- BOT HANDLERS (COMMANDS & UPLOADS) ---
+# --- BOT HANDLERS ---
 # =====================================================================================
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -296,7 +299,6 @@ async def ia_upload_handler(client, callback_query):
             f"⏳ Sending request to Hugging Face..."
         )
         
-        # We send the upload request to HF
         response = await asyncio.to_thread(requests.post, f"{Config.HF_WORKER_URL}/upload", json=payload, timeout=5)
         
         if response.status_code == 200:
@@ -480,4 +482,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
-        
+    
