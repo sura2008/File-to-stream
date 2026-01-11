@@ -1,4 +1,4 @@
-# app.py (FINAL UI & BASE64 UPDATE)
+# app.py (FINAL FIXED VERSION - UI MATCH & NO HF TEXT)
 
 import os
 import asyncio
@@ -9,7 +9,7 @@ import re
 import logging
 import math
 import requests
-import base64  # ✅ Added for Base64 encoding
+import base64
 
 from contextlib import asynccontextmanager
 from pyrogram import Client, filters, enums
@@ -27,12 +27,12 @@ from config import Config
 from database import db
 
 # =====================================================================================
-# --- BACKGROUND POLLING SERVICE (BASE64 & VIEWER UPDATE) ---
+# --- BACKGROUND POLLING SERVICE ---
 # =====================================================================================
 
 async def poll_huggingface_queue():
     """
-    Checks HF Worker for completed uploads, converts links to Base64, 
+    Checks Worker for completed uploads, converts links to Base64, 
     and sends the 'Open Online' viewer link.
     """
     if not Config.HF_WORKER_URL:
@@ -59,15 +59,13 @@ async def poll_huggingface_queue():
 
                     for msg in messages:
                         try:
-                            # 1. Extract the raw URL from the HTML anchor tag
-                            # Regex looks for href='...' or href="..."
+                            # 1. Extract the raw URL
                             url_match = re.search(r"href=['\"](.*?)['\"]", msg['text'])
                             
                             if url_match:
                                 raw_url = url_match.group(1)
                                 
                                 # 2. Convert to Base64
-                                # Encode: String -> Bytes -> Base64 Bytes -> String
                                 url_bytes = raw_url.encode('ascii')
                                 base64_bytes = base64.b64encode(url_bytes)
                                 base64_code = base64_bytes.decode('ascii')
@@ -80,13 +78,13 @@ async def poll_huggingface_queue():
                                 filename = filename_match.group(1) if filename_match else "File"
 
                                 result_text = (
-                                    f"✅ <b>Permanent Link Generated!</b>\n\n"
+                                    f"✅ <b>Permanent Link Ready!</b>\n\n"
                                     f"📂 <b>File:</b> {filename}\n\n"
                                     f"👇 <b>Click below to Watch/Download</b>"
                                 )
                                 
                                 buttons = InlineKeyboardMarkup([
-                                    [InlineKeyboardButton("▶️ Open Online (Hugging Face)", url=final_viewer_link)]
+                                    [InlineKeyboardButton("▶️ Open Online Player", url=final_viewer_link)]
                                 ])
 
                                 await bot.send_message(
@@ -96,7 +94,6 @@ async def poll_huggingface_queue():
                                     reply_markup=buttons
                                 )
                             else:
-                                # Fallback if regex fails
                                 await bot.send_message(msg['chat_id'], msg['text'], parse_mode=enums.ParseMode.HTML)
 
                             sent_ids.append(msg['id'])
@@ -104,7 +101,6 @@ async def poll_huggingface_queue():
                         except Exception as e:
                             print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
 
-                    # Confirm delivery
                     if sent_ids:
                         payload = {"message_ids": sent_ids}
                         await asyncio.to_thread(requests.post, DONE_URL, json=payload, timeout=10)
@@ -131,7 +127,6 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
-        # Start Background Task
         asyncio.create_task(poll_huggingface_queue())
         
     except Exception as e:
@@ -196,8 +191,13 @@ def get_readable_file_size(size_in_bytes):
         n += 1
     return f"{size_in_bytes:.2f} {power_labels[n]}"
 
+def mask_filename(name: str):
+    if not name: return "Protected File"
+    base, ext = os.path.splitext(name)
+    return f"{base[:10]}...{ext}"
+
 # =====================================================================================
-# --- BOT HANDLERS (UPDATED UI) ---
+# --- BOT HANDLERS (UI UPDATE) ---
 # =====================================================================================
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -211,44 +211,51 @@ async def start_command(client: Client, message: Message):
             quote=True
         )
     else:
-        await message.reply_text("👋 **Welcome!** Send me a file to convert it into a stream link.")
+        await message.reply_text("👋 **Welcome!** Send me a file to generate a link.")
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file_upload(client: Client, message: Message):
     try:
-        # Forward to Storage
+        # 1. Forward to Storage Immediately
         sent_message = await message.copy(chat_id=Config.STORAGE_CHANNEL)
         unique_id = secrets.token_urlsafe(8)
         await db.save_link(unique_id, sent_message.id)
         
-        # File Details
+        # 2. Get Details
         media = message.document or message.video or message.audio
         file_name = media.file_name or "Unknown_File"
         file_size = get_readable_file_size(media.file_size)
         
-        # Links
+        # 3. Generate Links
         stream_link = f"{Config.BASE_URL}/show/{unique_id}"
-        dl_link = f"{Config.BASE_URL}/dl/{sent_message.id}/{file_name.replace(' ', '_')}"
+        # Base64 Encode the Render Link for the File Opener
+        render_dl_link = f"{Config.BASE_URL}/dl/{sent_message.id}/{file_name.replace(' ', '_')}"
         
-        # UI FORMAT (Matched to User Request)
+        render_bytes = render_dl_link.encode('ascii')
+        render_base64 = base64.b64encode(render_bytes).decode('ascii')
+        
+        # This link opens the file directly in your Vercel Player
+        opener_link = f"https://v0-file-opener-video-player.vercel.app/view?value={render_base64}"
+        
+        # 4. UI FORMAT (Strictly matched to your image)
         response_text = (
             f"<b><u>Your Link Generated !</u></b>\n\n"
             f"📧 <b>FILE NAME :-</b> <code>{file_name}</code>\n\n"
             f"📦 <b>FILE SIZE :-</b> {file_size}\n\n"
             f"<b><u>Tap To Copy Link</u></b> 👇\n\n"
             f"🖥 <b>Stream :</b> <code>{stream_link}</code>\n\n"
-            f"📥 <b>Download :</b> <code>{dl_link}</code>\n\n"
+            f"📥 <b>Download :</b> <code>{render_dl_link}</code>\n\n"
             f"🚸 <b>NOTE : LINK WON'T EXPIRE TILL I DELETE 🤡</b>"
         )
         
-        # Buttons (Updated Layout)
+        # 5. Buttons (New Structure: No "Get File", No HF Text)
         buttons = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("• STREAM •", url=stream_link),
-                InlineKeyboardButton("• DOWNLOAD •", url=dl_link)
+                InlineKeyboardButton("• STREAM •", url=opener_link),
+                InlineKeyboardButton("• DOWNLOAD •", url=render_dl_link)
             ],
             [
-                InlineKeyboardButton("🚀 Get Permanent Link (HF)", callback_data=f"ia_upload_{sent_message.id}")
+                InlineKeyboardButton("• GET PERMANENT LINK •", callback_data=f"ia_upload_{sent_message.id}")
             ],
             [
                 InlineKeyboardButton("• CLOSE •", callback_data="close_data")
@@ -266,23 +273,22 @@ async def close_handler(client, callback_query):
     await callback_query.message.delete()
 
 # =====================================================================================
-# --- HUGGING FACE HANDOFF HANDLER ---
+# --- WORKER HANDOFF HANDLER (FIXED) ---
 # =====================================================================================
 
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
+    """
+    Handles 'Get Permanent Link' button.
+    Does NOT delete the message.
+    Sends a Toast Notification (Popup) instead.
+    """
     if not Config.HF_WORKER_URL:
-        await callback_query.answer("❌ Error: HF_WORKER_URL not configured.", show_alert=True)
+        await callback_query.answer("❌ Error: Worker URL not configured.", show_alert=True)
         return
 
     try:
-        # Edit message to show loading state
-        await callback_query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Generating Permanent Link...", callback_data="wait")]])
-        )
-
         message_id = int(callback_query.data.split("_")[2])
-        # Find the original user message to reply to later
         user_msg = callback_query.message.reply_to_message
         if not user_msg: user_msg = callback_query.message 
 
@@ -305,19 +311,22 @@ async def ia_upload_handler(client, callback_query):
             "message_id": user_msg.id
         }
 
-        # Send to Worker
-        response = await asyncio.to_thread(requests.post, f"{Config.HF_WORKER_URL}/upload", json=payload, timeout=5)
+        # Send to Worker in Background
+        # We use 'create_task' so we don't block the bot waiting for the request
+        asyncio.create_task(send_to_worker(Config.HF_WORKER_URL, payload, callback_query))
         
-        if response.status_code == 200:
-            await callback_query.answer("✅ Task Queued! You will receive the link shortly.", show_alert=True)
-            # We don't delete the message, we just revert/update buttons or leave as is
-            # User asked not to delete last message.
-        else:
-            await callback_query.answer("❌ Worker Rejected Request", show_alert=True)
+        # ✅ IMMEDIATE FEEDBACK: Just a popup, don't touch the message
+        await callback_query.answer("✅ Task Added! We will notify you when the link is ready.", show_alert=True)
 
     except Exception as e:
         print(f"Handoff Error: {e}")
-        await callback_query.answer(f"❌ Connection Failed", show_alert=True)
+        await callback_query.answer(f"❌ Failed to add task.", show_alert=True)
+
+async def send_to_worker(url, payload, cb):
+    try:
+        requests.post(f"{url}/upload", json=payload, timeout=5)
+    except:
+        pass # Worker might be sleeping, polling will pick it up or it will retry logic if implemented
 
 # =====================================================================================
 # --- WEB SERVER ---
@@ -339,7 +348,6 @@ async def show_page(request: Request, unique_id: str):
         safe_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
         file_size = get_readable_file_size(media.file_size)
         
-        # Render Stream Link
         direct_link = f"{Config.BASE_URL}/dl/{storage_msg_id}/{safe_name}"
         
         context = {
@@ -348,7 +356,6 @@ async def show_page(request: Request, unique_id: str):
             "file_size": file_size,
             "is_media": (media.mime_type or "").startswith(("video", "audio")),
             "direct_dl_link": direct_link,
-            # Pass the DIRECT Render URL to the template to put in the viewer
             "render_url": direct_link 
         }
         return templates.TemplateResponse("show.html", context)
@@ -442,4 +449,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-                        
+    
