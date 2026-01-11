@@ -1,4 +1,4 @@
-# app.py (FINAL FIXED VERSION)
+# app.py (FULL UPDATED VERSION WITH POLLING)
 
 import os
 import asyncio
@@ -8,7 +8,7 @@ import uvicorn
 import re
 import logging
 import math
-import requests  # <-- Required for Hugging Face Handoff
+import requests  # Required for polling
 
 from contextlib import asynccontextmanager
 from pyrogram import Client, filters, enums
@@ -26,13 +26,74 @@ from config import Config
 from database import db
 
 # =====================================================================================
+# --- BACKGROUND POLLING SERVICE (THE NEW FEATURE) ---
+# =====================================================================================
+
+async def poll_huggingface_queue():
+    """
+    Runs in the background. Checks HF Worker for messages every 30s.
+    """
+    if not Config.HF_WORKER_URL:
+        print("⚠️ HF_WORKER_URL not set. Background polling disabled.")
+        return
+
+    # ✅ Endpoints derived from your Config
+    POLL_URL = f"{Config.HF_WORKER_URL}/botmessages"
+    DONE_URL = f"{Config.HF_WORKER_URL}/donebotmessages"
+
+    print("🔄 Started Background Polling Service (Interval: 30s)...")
+
+    while True:
+        try:
+            # 1. Check for Pending Messages
+            # We run requests in a thread to avoid blocking the streaming server
+            response = await asyncio.to_thread(requests.get, POLL_URL, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                messages = data.get("messages", [])
+
+                if messages:
+                    print(f"📬 Found {len(messages)} pending messages!")
+                    sent_ids = []
+
+                    for msg in messages:
+                        try:
+                            # 2. Send Message via Telegram
+                            await bot.send_message(
+                                chat_id=msg['chat_id'], 
+                                text=msg['text'], 
+                                parse_mode=enums.ParseMode.HTML
+                            )
+                            sent_ids.append(msg['id'])
+                            await asyncio.sleep(0.5) # Anti-flood delay
+                        except Exception as e:
+                            print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
+
+                    # 3. Confirm Delivery to Hugging Face (Delete from Queue)
+                    if sent_ids:
+                        payload = {"message_ids": sent_ids}
+                        await asyncio.to_thread(requests.post, DONE_URL, json=payload, timeout=10)
+                        print(f"✅ Confirmed {len(sent_ids)} messages sent.")
+            
+            else:
+                # If HF is sleeping or erroring, just print briefly
+                pass
+
+        except Exception as e:
+            print(f"⚠️ Polling Error: {e}")
+
+        # 4. Wait 30 Seconds before next check
+        await asyncio.sleep(30)
+
+# =====================================================================================
 # --- SETUP: BOT, WEB SERVER & LIFESPAN ---
 # =====================================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Starts the Database and the Bot when the server turns on."""
-    print("--- Lifespan: Server chalu ho raha hai... ---")
+    """Starts Database, Bot, and Background Poller."""
+    print("--- Lifespan: Server starting... ---")
     await db.connect()
     
     try:
@@ -48,18 +109,17 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
-        # --- SAFE CHANNEL CHECK (Prevents Crash) ---
+        # --- START THE POLLER HERE ---
+        asyncio.create_task(poll_huggingface_queue())
+        
+        # --- SAFE CHANNEL CHECK ---
         print(f"Verifying storage channel ({Config.STORAGE_CHANNEL})...")
         try:
-            # We try to fetch the chat. If it fails (Peer Invalid), we CATCH the error 
-            # so the server doesn't crash.
             await bot.get_chat(Config.STORAGE_CHANNEL)
             print("✅ Storage channel accessible.")
         except Exception as e:
             print(f"!!! WARNING: Bot cannot access Storage Channel yet: {e}")
-            print("➡️ ACTION REQUIRED: Send a message to the channel or make it Public temporarily.")
 
-        # Force Sub Check
         if Config.FORCE_SUB_CHANNEL:
             try:
                 await bot.get_chat(Config.FORCE_SUB_CHANNEL)
@@ -87,14 +147,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- LOG FILTER (Hides messy /dl/ logs) ---
 class HideDLFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return "GET /dl/" not in record.getMessage()
 
 logging.getLogger("uvicorn.access").addFilter(HideDLFilter())
 
-# Setup Bot Client
 bot = Client(
     "SimpleStreamBot", 
     api_id=Config.API_ID, 
@@ -159,7 +217,6 @@ async def start_command(client: Client, message: Message):
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
         unique_id = message.command[1].split("_", 1)[1]
         
-        # Force Sub Logic
         if Config.FORCE_SUB_CHANNEL:
             try:
                 await client.get_chat_member(Config.FORCE_SUB_CHANNEL, message.from_user.id)
@@ -182,15 +239,12 @@ async def start_command(client: Client, message: Message):
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file_upload(client: Client, message: Message):
     try:
-        # Copy file to Storage Channel
         sent_message = await message.copy(chat_id=Config.STORAGE_CHANNEL)
         unique_id = secrets.token_urlsafe(8)
         await db.save_link(unique_id, sent_message.id)
         
-        # Generate Verification Link
         verify_link = f"https://t.me/{Config.BOT_USERNAME}?start=verify_{unique_id}"
         
-        # Buttons: Get Link AND Upload to Archive
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 Get Stream Link", url=verify_link)],
             [InlineKeyboardButton("🏛 Upload to Internet Archive", callback_data=f"ia_upload_{sent_message.id}")]
@@ -202,18 +256,16 @@ async def handle_file_upload(client: Client, message: Message):
         await message.reply_text(f"❌ Error saving file: {e}")
 
 # =====================================================================================
-# --- HUGGING FACE HANDOFF HANDLER (THE NEW FEATURE) ---
+# --- HUGGING FACE HANDOFF HANDLER ---
 # =====================================================================================
 
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
-    # 1. Check if Worker URL is set
     if not Config.HF_WORKER_URL:
         await callback_query.answer("❌ Error: HF_WORKER_URL not set in Render settings.", show_alert=True)
         return
 
     try:
-        # 2. Get Message Details
         message_id = int(callback_query.data.split("_")[2])
         user_msg = callback_query.message.reply_to_message
         
@@ -226,11 +278,9 @@ async def ia_upload_handler(client, callback_query):
             await callback_query.answer("❌ Error: No media found.", show_alert=True)
             return
 
-        # 3. Construct the ENDPOINT URL (Stream Link)
         file_name = media.file_name or "video.mp4"
         safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
         
-        # THIS IS THE ENDPOINT THE USER ASKED FOR
         stream_link = f"{Config.BASE_URL}/dl/{message_id}/{safe_file_name}"
         
         payload = {
@@ -240,20 +290,21 @@ async def ia_upload_handler(client, callback_query):
             "message_id": user_msg.id
         }
 
-        # 4. Send to Hugging Face Worker
         await callback_query.edit_message_text(
             f"🚀 **Connecting to Archive Worker...**\n\n"
             f"📡 **Endpoint:** `{stream_link}`\n"
             f"⏳ Sending request to Hugging Face..."
         )
         
-        response = requests.post(f"{Config.HF_WORKER_URL}/upload", json=payload, timeout=5)
+        # We send the upload request to HF
+        # IMPORTANT: This is just the TRIGGER. The actual notification will come via the Polling Service later.
+        response = await asyncio.to_thread(requests.post, f"{Config.HF_WORKER_URL}/upload", json=payload, timeout=5)
         
         if response.status_code == 200:
             await callback_query.edit_message_text(
                 "✅ **Task Accepted!**\n\n"
-                "The worker has started downloading from the endpoint.\n"
-                "__I will notify you here when the permanent link is ready.__"
+                "The worker has started downloading.\n"
+                "__You will receive a notification when the permanent link is ready.__"
             )
         else:
             await callback_query.edit_message_text(f"❌ Worker Rejected: {response.text}")
@@ -272,26 +323,16 @@ async def health():
 
 @app.get("/show/{unique_id}", response_class=HTMLResponse)
 async def show_page(request: Request, unique_id: str):
-    """Serve the HTML page."""
     storage_msg_id = await db.get_link(unique_id)
     if not storage_msg_id: raise HTTPException(404, "Link Expired")
     
-    # Simple check to see if we can access the file
     try:
-        # Attempt to get file info from channel
-        # We wrap this in try/except in case channel is inaccessible
         msg = await multi_clients[0].get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
         media = msg.document or msg.video or msg.audio
         if not media: raise Exception
     except:
-        # If bot can't see channel, page still loads but might fail on download if not fixed
         pass
         
-    # We might not have media info if the try block above failed, so handle safely
-    # If msg failed, we can't show real filename, but we can still show the page.
-    # Ideally, we need the file to stream.
-    
-    # Re-fetch strictly for context if possible, otherwise generic
     file_name = "Secure File"
     file_size = "Unknown"
     is_media = False
@@ -316,7 +357,6 @@ async def show_page(request: Request, unique_id: str):
 
 @app.get("/api/file/{unique_id}", response_class=JSONResponse)
 async def get_file_details_api(request: Request, unique_id: str):
-    """API Endpoint used by the frontend to get file details."""
     message_id = await db.get_link(unique_id)
     if not message_id:
         raise HTTPException(status_code=404, detail="Link expired or invalid.")
@@ -330,7 +370,7 @@ async def get_file_details_api(request: Request, unique_id: str):
         media = message.document or message.video or message.audio
         if not media: raise Exception
     except Exception:
-        raise HTTPException(status_code=404, detail="File not found on Telegram (or Bot cannot see channel).")
+        raise HTTPException(status_code=404, detail="File not found on Telegram.")
 
     file_name = media.file_name or "file"
     safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
@@ -347,7 +387,6 @@ async def get_file_details_api(request: Request, unique_id: str):
     return response_data
 
 class ByteStreamer:
-    """Handles fetching file chunks from Telegram."""
     def __init__(self, client: Client):
         self.client = client
 
@@ -355,7 +394,6 @@ class ByteStreamer:
         client = self.client
         work_loads[index] += 1
         
-        # Initialize Media Session if needed
         media_session = client.media_sessions.get(file_id.dc_id)
         if media_session is None:
             if file_id.dc_id != await client.storage.dc_id():
@@ -394,7 +432,6 @@ class ByteStreamer:
 
 @app.get("/dl/{mid}/{fname}")
 async def stream_media(request: Request, mid: int, fname: str):
-    """THE ENDPOINT: Streams file from Telegram to User (or Worker)."""
     try:
         index = min(work_loads, key=work_loads.get, default=0)
         client = multi_clients[index]
@@ -444,4 +481,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
-    
+                
