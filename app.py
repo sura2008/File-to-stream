@@ -336,7 +336,7 @@ async def handle_file_upload(client: Client, message: Message):
 async def close_handler(client, callback_query):
     await callback_query.message.delete()
 
-# --- HANDOFF HANDLER (INCREASED TIMEOUT & RETRY) ---
+# --- HANDOFF HANDLER (30 SECOND TIMEOUT FIX) ---
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
     if await db.is_user_banned(callback_query.from_user.id):
@@ -386,8 +386,9 @@ async def ia_upload_handler(client, callback_query):
 
         for worker_url in workers:
             try:
-                # ⚡ INCREASED TIMEOUT TO 25 SECONDS ⚡
-                response = await asyncio.to_thread(requests.post, f"{worker_url}/upload", json=payload, timeout=25)
+                # ⚡ TIMEOUT INCREASED TO 30 SECONDS ⚡
+                # This ensures we wait long enough for the sleeping worker to wake up
+                response = await asyncio.to_thread(requests.post, f"{worker_url}/upload", json=payload, timeout=30)
                 
                 if response.status_code == 200:
                     await callback_query.answer("✅ Task Accepted! We will notify you.", show_alert=True)
@@ -404,7 +405,12 @@ async def ia_upload_handler(client, callback_query):
 
     except Exception as e:
         print(f"❌ Handoff Failed: {e}")
-        await callback_query.answer(f"❌ Failed: {str(e)[:50]}", show_alert=True)
+        
+        # Friendly Error Message
+        if "HTTPSConnectionPool" in str(e) or "Read timed out" in str(e):
+             await callback_query.answer("⚠️ Server woke up! Please click again.", show_alert=True)
+        else:
+             await callback_query.answer(f"❌ Failed: {str(e)[:50]}", show_alert=True)
         
         try:
             restore_markup = InlineKeyboardMarkup([
@@ -530,4 +536,4 @@ async def stream_media(request: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-    
+        
