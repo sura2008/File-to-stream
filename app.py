@@ -336,6 +336,7 @@ async def handle_file_upload(client: Client, message: Message):
 async def close_handler(client, callback_query):
     await callback_query.message.delete()
 
+# --- HANDOFF HANDLER (INCREASED TIMEOUT & RETRY) ---
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
     if await db.is_user_banned(callback_query.from_user.id):
@@ -350,7 +351,7 @@ async def ia_upload_handler(client, callback_query):
         old = callback_query.message.reply_markup.inline_keyboard
         proc_markup = InlineKeyboardMarkup([
             [old[0][0], old[0][1]], 
-            [InlineKeyboardButton("⏳ Processing...", callback_data="ignore")], 
+            [InlineKeyboardButton("⏳ Processing... (Please Wait)", callback_data="ignore")], 
             old[2]
         ])
         await callback_query.edit_message_reply_markup(reply_markup=proc_markup)
@@ -362,6 +363,9 @@ async def ia_upload_handler(client, callback_query):
         user_msg = callback_query.message.reply_to_message or callback_query.message
         
         stored_msg = await client.get_messages(Config.STORAGE_CHANNEL, message_id)
+        if not stored_msg:
+            raise Exception("Message not found in Storage Channel")
+
         media = stored_msg.document or stored_msg.video or stored_msg.audio
         
         safe_name = "".join(c for c in (media.file_name or "vid.mp4") if c.isalnum() or c in ('.', '_', '-')).rstrip()
@@ -378,23 +382,29 @@ async def ia_upload_handler(client, callback_query):
         workers = Config.HF_WORKERS.copy()
         random.shuffle(workers)
         
+        last_error = ""
+
         for worker_url in workers:
             try:
-                response = await asyncio.to_thread(requests.post, f"{worker_url}/upload", json=payload, timeout=3)
+                # ⚡ INCREASED TIMEOUT TO 25 SECONDS ⚡
+                response = await asyncio.to_thread(requests.post, f"{worker_url}/upload", json=payload, timeout=25)
                 
                 if response.status_code == 200:
                     await callback_query.answer("✅ Task Accepted! We will notify you.", show_alert=True)
                     success = True
                     break 
-            except:
+                else:
+                    last_error = f"Worker rejected: {response.status_code}"
+            except Exception as e:
+                last_error = str(e)
                 continue 
         
         if not success:
-            raise Exception("All workers failed.")
+            raise Exception(f"All workers failed. Last error: {last_error}")
 
     except Exception as e:
         print(f"❌ Handoff Failed: {e}")
-        await callback_query.answer("❌ All Servers Busy. Restoring button...", show_alert=True)
+        await callback_query.answer(f"❌ Failed: {str(e)[:50]}", show_alert=True)
         
         try:
             restore_markup = InlineKeyboardMarkup([
@@ -410,6 +420,7 @@ async def ia_upload_handler(client, callback_query):
 async def ignore_callback(client, callback_query):
     await callback_query.answer("⏳ Processing...", show_alert=True)
 
+# --- WEB SERVER ---
 @app.get("/")
 async def health(): return {"status": "ok"}
 
@@ -483,7 +494,6 @@ async def stream_media(request: Request, mid: int, fname: str):
         client = multi_clients[index]
         streamer = class_cache.get(client) or ByteStreamer(client)
         class_cache[client] = streamer
-        
         msg = await client.get_messages(Config.STORAGE_CHANNEL, mid)
         media = msg.document or msg.video or msg.audio
         if not media: raise FileNotFoundError
@@ -514,16 +524,10 @@ async def stream_media(request: Request, mid: int, fname: str):
             "Accept-Ranges": "bytes"
         }
         status_code = 206 if range_header else 200
-        if range_header:
-            headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-            
+        if range_header: headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
         return StreamingResponse(body, status_code=status_code, headers=headers)
-        
-    except Exception as e:
-        print(f"Stream Error: {e}")
-        raise HTTPException(404, "File not found or Stream failed.")
+    except Exception: raise HTTPException(404)
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-            
-        
+    
