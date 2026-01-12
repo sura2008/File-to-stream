@@ -27,73 +27,83 @@ from config import Config
 from database import db
 
 # =====================================================================================
-# --- BACKGROUND POLLING SERVICE ---
+# --- BACKGROUND POLLING SERVICE (Talks to Controller) ---
 # =====================================================================================
 
-async def poll_huggingface_queue():
+async def poll_controller_queue():
     if not Config.HF_WORKERS:
-        print("⚠️ No Workers configured. Polling disabled.")
+        print("⚠️ No Controller URL configured. Polling disabled.")
         return
 
-    print(f"🔄 Started Polling for {len(Config.HF_WORKERS)} Workers...")
+    # We assume the first URL in the list is your Controller
+    CONTROLLER_URL = Config.HF_WORKERS[0]
+    print(f"🔄 Connected to Controller: {CONTROLLER_URL}")
+    print("🚀 Polling set to 15 seconds...")
+    
     VIEWER_BASE = "https://v0-file-opener-video-player.vercel.app/view?value="
 
     while True:
-        for worker_url in Config.HF_WORKERS:
-            try:
-                response = await asyncio.to_thread(requests.get, f"{worker_url}/botmessages", timeout=5)
+        try:
+            # Poll the Controller for finished tasks
+            # Timeout 10s is plenty for the Controller to respond
+            response = await asyncio.to_thread(requests.get, f"{CONTROLLER_URL}/botmessages", timeout=10)
 
-                if response.status_code == 200:
-                    data = response.json()
-                    messages = data.get("messages", [])
+            if response.status_code == 200:
+                data = response.json()
+                messages = data.get("messages", [])
 
-                    if messages:
-                        sent_ids = []
-                        for msg in messages:
-                            try:
-                                url_match = re.search(r"href=['\"](.*?)['\"]", msg['text'])
-                                if url_match:
-                                    raw_url = url_match.group(1)
-                                    url_bytes = raw_url.encode('ascii')
-                                    base64_bytes = base64.b64encode(url_bytes)
-                                    base64_code = base64_bytes.decode('ascii')
-                                    final_viewer_link = f"{VIEWER_BASE}{base64_code}"
-                                    
-                                    filename_match = re.search(r"📂 <b>File:</b> (.*)\n", msg['text'])
-                                    filename = filename_match.group(1) if filename_match else "File"
+                if messages:
+                    sent_ids = []
+                    for msg in messages:
+                        try:
+                            # Extract Link & Create Viewer URL
+                            url_match = re.search(r"href=['\"](.*?)['\"]", msg['text'])
+                            if url_match:
+                                raw_url = url_match.group(1)
+                                url_bytes = raw_url.encode('ascii')
+                                base64_bytes = base64.b64encode(url_bytes)
+                                base64_code = base64_bytes.decode('ascii')
+                                final_viewer_link = f"{VIEWER_BASE}{base64_code}"
+                                
+                                filename_match = re.search(r"📂 <b>File:</b> (.*)\n", msg['text'])
+                                filename = filename_match.group(1) if filename_match else "File"
 
-                                    result_text = (
-                                        f"✅ <b>Permanent Link Ready!</b>\n\n"
-                                        f"📂 <b>File:</b> {filename}\n\n"
-                                        f"👇 <b>Click below to Watch/Download</b>"
-                                    )
-                                    
-                                    buttons = InlineKeyboardMarkup([
-                                        [InlineKeyboardButton("▶️ Open Online Player", url=final_viewer_link)]
-                                    ])
+                                result_text = (
+                                    f"✅ <b>Permanent Link Ready!</b>\n\n"
+                                    f"📂 <b>File:</b> {filename}\n\n"
+                                    f"👇 <b>Click below to Watch/Download</b>"
+                                )
+                                
+                                buttons = InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("▶️ Open Online Player", url=final_viewer_link)]
+                                ])
 
-                                    await bot.send_message(
-                                        chat_id=msg['chat_id'], 
-                                        text=result_text, 
-                                        parse_mode=enums.ParseMode.HTML,
-                                        reply_markup=buttons
-                                    )
-                                else:
-                                    await bot.send_message(msg['chat_id'], msg['text'], parse_mode=enums.ParseMode.HTML)
+                                await bot.send_message(
+                                    chat_id=msg['chat_id'], 
+                                    text=result_text, 
+                                    parse_mode=enums.ParseMode.HTML,
+                                    reply_markup=buttons
+                                )
+                            else:
+                                # Fallback if regex fails
+                                await bot.send_message(msg['chat_id'], msg['text'], parse_mode=enums.ParseMode.HTML)
 
-                                sent_ids.append(msg['id'])
-                                await asyncio.sleep(0.5) 
-                            except Exception as e:
-                                print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
+                            sent_ids.append(msg['id'])
+                            await asyncio.sleep(0.5) # Floodwait protection
+                        except Exception as e:
+                            print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
 
-                        if sent_ids:
-                            payload = {"message_ids": sent_ids}
-                            await asyncio.to_thread(requests.post, f"{worker_url}/donebotmessages", json=payload, timeout=10)
-            
-            except Exception:
-                continue
+                    # Tell Controller we delivered these messages
+                    if sent_ids:
+                        payload = {"message_ids": sent_ids}
+                        await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/donebotmessages", json=payload, timeout=10)
         
-        await asyncio.sleep(30)
+        except Exception as e:
+            # Controller might be sleeping or restarting, just wait
+            pass
+        
+        # ⚡ UPDATED: Sleep for 15 seconds instead of 30
+        await asyncio.sleep(15)
         # =====================================================================================
 # --- SETUP, LOGGING & ADMIN COMMANDS ---
 # =====================================================================================
@@ -111,13 +121,13 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
-        asyncio.create_task(poll_huggingface_queue())
+        asyncio.create_task(poll_controller_queue())
         
         if Config.LOG_CHANNEL:
             try:
-                await bot.send_message(Config.LOG_CHANNEL, "🟢 **Bot Started & Connected to Logs**")
+                await bot.send_message(Config.LOG_CHANNEL, "🟢 **Bot Online (Controller Mode)**")
             except:
-                print("❌ Bot cannot access LOG_CHANNEL.")
+                pass
 
     except Exception as e:
         print(f"Startup Error: {e}")
@@ -203,7 +213,6 @@ async def send_log(user, file_name, file_size, stream_link, dl_link):
     except Exception as e:
         print(f"Log Error: {e}")
 
-# --- ADMIN BLOCKING SYSTEM ---
 @bot.on_message(filters.command(["ban", "unban"]) & filters.user(Config.ADMINS))
 async def admin_ban_handler(client, message):
     if not message.reply_to_message and len(message.command) < 2:
@@ -245,7 +254,7 @@ async def admin_ban_handler(client, message):
 async def stats_command(client, message):
     total = await db.total_users_count()
     await message.reply(f"📊 **Total Users:** `{total}`")
-    # =====================================================================================
+# =====================================================================================
 # --- BOT HANDLERS & WEB SERVER ---
 # =====================================================================================
 
@@ -336,7 +345,7 @@ async def handle_file_upload(client: Client, message: Message):
 async def close_handler(client, callback_query):
     await callback_query.message.delete()
 
-# --- HANDOFF HANDLER (30 SECOND TIMEOUT FIX) ---
+# --- SEND TO CONTROLLER (MEDIUM WORKER) ---
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
     if await db.is_user_banned(callback_query.from_user.id):
@@ -344,14 +353,17 @@ async def ia_upload_handler(client, callback_query):
         return
 
     if not Config.HF_WORKERS:
-        await callback_query.answer("❌ Error: No Workers configured.", show_alert=True)
+        await callback_query.answer("❌ Error: No Controller Configured.", show_alert=True)
         return
+
+    # Use the first URL (Controller)
+    CONTROLLER_URL = Config.HF_WORKERS[0]
 
     try:
         old = callback_query.message.reply_markup.inline_keyboard
         proc_markup = InlineKeyboardMarkup([
             [old[0][0], old[0][1]], 
-            [InlineKeyboardButton("⏳ Processing... (Please Wait)", callback_data="ignore")], 
+            [InlineKeyboardButton("⏳ Processing...", callback_data="ignore")], 
             old[2]
         ])
         await callback_query.edit_message_reply_markup(reply_markup=proc_markup)
@@ -377,41 +389,27 @@ async def ia_upload_handler(client, callback_query):
             "chat_id": user_msg.chat.id, 
             "message_id": user_msg.id
         }
-
-        success = False
-        workers = Config.HF_WORKERS.copy()
-        random.shuffle(workers)
         
-        last_error = ""
-
-        for worker_url in workers:
+        # SEND TO CONTROLLER (Retry Logic)
+        success = False
+        for attempt in range(2):
             try:
-                # ⚡ TIMEOUT INCREASED TO 30 SECONDS ⚡
-                # This ensures we wait long enough for the sleeping worker to wake up
-                response = await asyncio.to_thread(requests.post, f"{worker_url}/upload", json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    await callback_query.answer("✅ Task Accepted! We will notify you.", show_alert=True)
+                # Timeout 35s to allow Controller to wake up and dispatch
+                resp = await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/upload", json=payload, timeout=35)
+                if resp.status_code == 200:
+                    await callback_query.answer("✅ Task Accepted by Controller!", show_alert=True)
                     success = True
-                    break 
-                else:
-                    last_error = f"Worker rejected: {response.status_code}"
-            except Exception as e:
-                last_error = str(e)
-                continue 
+                    break
+            except Exception:
+                # If Controller is sleeping, wait 2s and try again
+                if attempt == 0: await asyncio.sleep(2)
         
         if not success:
-            raise Exception(f"All workers failed. Last error: {last_error}")
+            raise Exception("Controller unreachable.")
 
     except Exception as e:
-        print(f"❌ Handoff Failed: {e}")
-        
-        # Friendly Error Message
-        if "HTTPSConnectionPool" in str(e) or "Read timed out" in str(e):
-             await callback_query.answer("⚠️ Server woke up! Please click again.", show_alert=True)
-        else:
-             await callback_query.answer(f"❌ Failed: {str(e)[:50]}", show_alert=True)
-        
+        print(f"Handoff Error: {e}")
+        await callback_query.answer("❌ Failed. Controller busy/sleeping.", show_alert=True)
         try:
             restore_markup = InlineKeyboardMarkup([
                 [old[0][0], old[0][1]], 
