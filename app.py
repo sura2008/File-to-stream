@@ -26,9 +26,10 @@ from config import Config
 from database import db
 
 # =====================================================================================
-# --- BACKGROUND POLLING (HANDLES AUTO-POSTS & LOGS) ---
+# --- BACKGROUND TASKS (POLLER + CHANNEL SCANNER) ---
 # =====================================================================================
 
+# 1. Poll Controller for Finished Links
 async def poll_controller_queue():
     if not Config.HF_WORKERS:
         print("⚠️ No Controller URL configured. Polling disabled.")
@@ -36,13 +37,11 @@ async def poll_controller_queue():
 
     CONTROLLER_URL = Config.HF_WORKERS[0]
     print(f"🔄 Connected to Controller: {CONTROLLER_URL}")
-    print("🚀 Polling set to 15 seconds...")
     
     VIEWER_BASE = "https://v0-file-opener-video-player.vercel.app/view?value="
 
     while True:
         try:
-            # Poll Controller
             response = await asyncio.to_thread(requests.get, f"{CONTROLLER_URL}/botmessages", timeout=10)
 
             if response.status_code == 200:
@@ -53,7 +52,7 @@ async def poll_controller_queue():
                     sent_ids = []
                     for msg in messages:
                         try:
-                            # 1. Parse Data
+                            # Parse Link
                             url_match = re.search(r"href=['\"](.*?)['\"]", msg['text'])
                             raw_url = url_match.group(1) if url_match else ""
                             
@@ -62,44 +61,45 @@ async def poll_controller_queue():
                                 base64_code = base64.b64encode(url_bytes).decode('ascii')
                                 final_viewer_link = f"{VIEWER_BASE}{base64_code}"
                             else:
-                                final_viewer_link = "https://google.com" # Fallback
+                                final_viewer_link = "https://google.com"
 
                             filename_match = re.search(r"📂 <b>File:</b> (.*)\n", msg['text'])
                             filename = filename_match.group(1) if filename_match else "File"
                             
                             chat_id = int(msg['chat_id'])
-                            message_id = int(msg.get('message_id', 0)) # ID of the message to edit/reply to
+                            message_id = int(msg.get('message_id', 0))
 
-                            # 🟢 CASE 1: AUTO-UPLOAD CHANNEL (Edit the Post)
-                            if chat_id == Config.AUTO_UPLOAD_CHANNEL:
+                            # 🟢 CASE 1: AUTO-UPLOAD CHANNELS (Edit Post)
+                            if chat_id in Config.AUTO_UPLOAD_CHANNELS:
                                 try:
                                     original_msg = await bot.get_messages(chat_id, message_id)
                                     existing_caption = original_msg.caption or ""
                                     
-                                    new_caption = (
-                                        f"{existing_caption}\n\n"
-                                        f"Here is 👉👉 <a href='{final_viewer_link}'>link</a> 👈👈"
-                                    )
-                                    
-                                    buttons = InlineKeyboardMarkup([
-                                        [InlineKeyboardButton("▶️ Open/Download Online", url=final_viewer_link)],
-                                        [InlineKeyboardButton("🔗 Copy Link", url=final_viewer_link)]
-                                    ])
-                                    
-                                    await bot.edit_message_caption(
-                                        chat_id=chat_id,
-                                        message_id=message_id,
-                                        caption=new_caption,
-                                        reply_markup=buttons,
-                                        parse_mode=enums.ParseMode.HTML
-                                    )
-                                    print(f"✅ Auto-Edited Channel Post {message_id}")
+                                    # Avoid double editing
+                                    if "Here is 👉👉" not in existing_caption:
+                                        new_caption = (
+                                            f"{existing_caption}\n\n"
+                                            f"Here is 👉👉 <a href='{final_viewer_link}'>link</a> 👈👈"
+                                        )
+                                        
+                                        buttons = InlineKeyboardMarkup([
+                                            [InlineKeyboardButton("▶️ Open/Download Online", url=final_viewer_link)],
+                                            [InlineKeyboardButton("🔗 Copy Link", url=final_viewer_link)]
+                                        ])
+                                        
+                                        await bot.edit_message_caption(
+                                            chat_id=chat_id,
+                                            message_id=message_id,
+                                            caption=new_caption,
+                                            reply_markup=buttons,
+                                            parse_mode=enums.ParseMode.HTML
+                                        )
+                                        print(f"✅ Auto-Edited Channel Post {message_id}")
                                 except Exception as e:
                                     print(f"❌ Failed to edit channel post: {e}")
 
-                            # 🔵 CASE 2: PRIVATE USER (Send Reply & Log)
+                            # 🔵 CASE 2: PRIVATE USER
                             else:
-                                # A. Send "Link Ready" Message
                                 result_text = (
                                     f"✅ <b>Permanent Link Ready!</b>\n\n"
                                     f"📂 <b>File:</b> {filename}\n"
@@ -109,10 +109,9 @@ async def poll_controller_queue():
                                 buttons = InlineKeyboardMarkup([
                                     [InlineKeyboardButton("▶️ Open Online Player", url=final_viewer_link)]
                                 ])
-                                
                                 await bot.send_message(chat_id=chat_id, text=result_text, reply_to_message_id=message_id, parse_mode=enums.ParseMode.HTML, reply_markup=buttons)
 
-                                # B. Log to Log Channel 2
+                                # Log to Log Channel 2
                                 if Config.LOG_CHANNEL_2:
                                     user_link = f"<a href='tg://user?id={chat_id}'>{chat_id}</a>"
                                     log_text = (
@@ -134,7 +133,32 @@ async def poll_controller_queue():
         
         except Exception: pass
         await asyncio.sleep(15)
-                                # =====================================================================================
+
+# 2. 🆕 CHANNEL SCANNER (Runs every 60s)
+# Checks for missed files and uploads them (Fixes "Auto upload not working" issue)
+async def scan_channels_periodically():
+    if not Config.AUTO_UPLOAD_CHANNELS or not Config.HF_WORKERS:
+        return
+
+    print("🕵️ Started Channel Scanner (Every 60s)")
+    while True:
+        try:
+            for chat_id in Config.AUTO_UPLOAD_CHANNELS:
+                # Check last 10 messages
+                async for message in bot.get_chat_history(chat_id, limit=10):
+                    if message.media and not message.video_note and not message.sticker:
+                        # Check if already has link
+                        caption = message.caption or ""
+                        if "Here is 👉👉" not in caption:
+                            print(f"⚡ Found Missed File in {chat_id}: {message.id}")
+                            # Trigger Upload
+                            await auto_channel_handler(bot, message)
+                            await asyncio.sleep(2) # Wait to avoid flood
+        except Exception as e:
+            print(f"Scanner Error: {e}")
+        
+        await asyncio.sleep(60)
+        # =====================================================================================
 # --- SETUP & INITIALIZATION ---
 # =====================================================================================
 
@@ -150,10 +174,12 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
+        # Start Background Tasks
         asyncio.create_task(poll_controller_queue())
+        asyncio.create_task(scan_channels_periodically()) # Start Scanner
         
         if Config.LOG_CHANNEL:
-            try: await bot.send_message(Config.LOG_CHANNEL, "🟢 **Bot Online**")
+            try: await bot.send_message(Config.LOG_CHANNEL, "🟢 **Bot Online & Scanning**")
             except: pass
             
     except Exception as e: print(f"Startup Error: {e}")
@@ -166,7 +192,6 @@ templates = Jinja2Templates(directory="templates")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Hide DL logs
 logging.getLogger("uvicorn.access").addFilter(lambda record: "GET /dl/" not in record.getMessage())
 
 bot = Client("SimpleStreamBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, in_memory=True)
@@ -205,56 +230,40 @@ async def send_log(user, file_name, file_size, stream_link, dl_link):
                f"📂 <b>File:</b> {file_name}\n📦 <b>Size:</b> {file_size}\n\n🔗 <b>Stream:</b> {stream_link}\n🔗 <b>DL:</b> {dl_link}")
     try: await bot.send_message(Config.LOG_CHANNEL, log_msg, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
     except: pass
-    # =====================================================================================
+  # =====================================================================================
 # --- ADMIN TOOLS & AUTO-CHANNEL ---
 # =====================================================================================
 
-# --- BROADCAST SYSTEM ---
 @bot.on_message(filters.command("all") & filters.user(Config.ADMINS))
 async def broadcast_handler(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/all Hello users`")
-    
+    if len(message.command) < 2: return await message.reply("Usage: `/all Hello`")
     text = message.text.split(None, 1)[1]
-    status_msg = await message.reply("⏳ Starting Broadcast...")
-    
+    status_msg = await message.reply("⏳ Broadcasting...")
     users = await db.col_users.find({}).to_list(length=None) 
-    done, blocked, error = 0, 0, 0
-    
+    done, error = 0, 0
     for user in users:
         try:
             await bot.send_message(user['_id'], text)
             done += 1
             await asyncio.sleep(0.1)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            await bot.send_message(user['_id'], text)
-            done += 1
-        except Exception:
-            error += 1
-            
-    await status_msg.edit(f"✅ **Broadcast Complete**\n\nSuccess: {done}\nFailed: {error}")
+        except: error += 1
+    await status_msg.edit(f"✅ **Done**\nSuccess: {done}\nFailed: {error}")
 
-# --- BAN SYSTEM (UPDATED FOR LOG CHANNEL 2) ---
 @bot.on_message(filters.command(["ban", "unban"]) & filters.user(Config.ADMINS))
 async def admin_ban_handler(client, message):
     target_id = None
     if message.reply_to_message:
-        # Try to find ID in text (works for both log channels)
         match = re.search(r"ID: <code>(\d+)</code>", message.reply_to_message.text)
         if match: target_id = int(match.group(1))
-        # Or from user link
         elif "tg://user?id=" in message.reply_to_message.text:
              match = re.search(r"tg://user\?id=(\d+)", message.reply_to_message.text)
              if match: target_id = int(match.group(1))
         elif message.reply_to_message.from_user: target_id = message.reply_to_message.from_user.id
     elif len(message.command) > 1:
-        arg = message.command[1]
-        if arg.isdigit(): target_id = int(arg)
-        elif arg.startswith("@"): target_id = await db.get_user_by_username(arg)
+        if message.command[1].isdigit(): target_id = int(message.command[1])
+        elif message.command[1].startswith("@"): target_id = await db.get_user_by_username(message.command[1])
 
-    if not target_id: return await message.reply("❌ User ID not found.")
-
+    if not target_id: return await message.reply("❌ User not found.")
     if message.command[0] == "ban":
         await db.ban_user(target_id)
         await message.reply(f"🚫 User `{target_id}` BANNED.")
@@ -262,19 +271,23 @@ async def admin_ban_handler(client, message):
         await db.unban_user(target_id)
         await message.reply(f"✅ User `{target_id}` UNBANNED.")
 
-# --- AUTO-UPLOAD CHANNEL LISTENER ---
-@bot.on_message(filters.chat(Config.AUTO_UPLOAD_CHANNEL) & (filters.document | filters.video | filters.audio))
+# --- AUTO-UPLOAD LISTENER (Supports List of Channels) ---
+@bot.on_message(filters.chat(Config.AUTO_UPLOAD_CHANNELS) & (filters.document | filters.video | filters.audio))
 async def auto_channel_handler(client, message):
     if not Config.HF_WORKERS: return
     
+    # Check if already processed to prevent loops
+    if message.caption and "Here is 👉👉" in message.caption:
+        return
+
     CONTROLLER_URL = Config.HF_WORKERS[0]
     media = message.document or message.video or message.audio
     
-    # 1. Copy to Storage to get clean File ID
     try:
         stored = await message.copy(Config.STORAGE_CHANNEL)
-    except:
-        return # Failed to copy
+    except Exception as e:
+        print(f"Storage Copy Failed: {e}")
+        return 
     
     safe_name = "".join(c for c in (media.file_name or "vid.mp4") if c.isalnum() or c in ('.', '_', '-')).rstrip()
     stream_link = f"{Config.BASE_URL}/dl/{stored.id}/{safe_name}"
@@ -282,22 +295,20 @@ async def auto_channel_handler(client, message):
     payload = {
         "stream_link": stream_link,
         "file_name": media.file_name,
-        "chat_id": message.chat.id,  # Channel ID
-        "message_id": message.id     # Channel Post ID (to edit later)
+        "chat_id": message.chat.id,
+        "message_id": message.id 
     }
     
-    # Retry dispatch silently
     asyncio.create_task(dispatch_background(CONTROLLER_URL, payload))
 
 async def dispatch_background(url, payload):
-    for _ in range(10): # Try for 10 times (queue logic)
+    for _ in range(3):
         try:
             requests.post(f"{url}/upload", json=payload, timeout=5)
-            return # Success
-        except:
-            await asyncio.sleep(5)
-    # =====================================================================================
-# --- BOT HANDLERS & WEB SERVER ---
+            return 
+        except: await asyncio.sleep(2)
+# =====================================================================================
+# --- BOT HANDLERS & HANDOFF FIX ---
 # =====================================================================================
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -351,14 +362,16 @@ async def handle_file_upload(client: Client, message: Message):
 @bot.on_callback_query(filters.regex("close_data"))
 async def close_handler(client, callback_query): await callback_query.message.delete()
 
-# --- SEND TO CONTROLLER ---
+# --- SEND TO CONTROLLER (FIXED BUSY ERROR) ---
 @bot.on_callback_query(filters.regex(r"^ia_upload_"))
 async def ia_upload_handler(client, callback_query):
     if await db.is_user_banned(callback_query.from_user.id): return await callback_query.answer("🚫 Banned.", show_alert=True)
-    if not Config.HF_WORKERS: return await callback_query.answer("❌ No Controller Configured.", show_alert=True)
-
+    
+    # Check Controller
+    if not Config.HF_WORKERS: return await callback_query.answer("❌ Config Error: No Controller URL.", show_alert=True)
     CONTROLLER_URL = Config.HF_WORKERS[0]
 
+    # Show Processing
     try:
         old = callback_query.message.reply_markup.inline_keyboard
         proc_markup = InlineKeyboardMarkup([[old[0][0], old[0][1]], [InlineKeyboardButton("⏳ Processing...", callback_data="ignore")], old[2]])
@@ -382,9 +395,11 @@ async def ia_upload_handler(client, callback_query):
         }
         
         success = False
-        for attempt in range(2):
+        last_error = ""
+        # Retry logic: 3 attempts, 60s timeout
+        for attempt in range(3):
             try:
-                resp = await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/upload", json=payload, timeout=35)
+                resp = await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/upload", json=payload, timeout=60)
                 if resp.status_code == 200:
                     try:
                         done_markup = InlineKeyboardMarkup([[old[0][0], old[0][1]], [InlineKeyboardButton("✅ Generated Successfully", callback_data="ignore")], old[2]])
@@ -394,14 +409,17 @@ async def ia_upload_handler(client, callback_query):
                     await callback_query.answer("✅ Task Accepted! Link coming soon...", show_alert=True)
                     success = True
                     break
-            except:
-                if attempt == 0: await asyncio.sleep(2)
+                else:
+                    last_error = f"HTTP {resp.status_code}"
+            except Exception as e:
+                last_error = str(e)
+                if attempt < 2: await asyncio.sleep(2)
         
-        if not success: raise Exception("Controller unreachable.")
+        if not success: raise Exception(f"Controller Failed: {last_error}")
 
     except Exception as e:
         print(f"Handoff Error: {e}")
-        await callback_query.answer("❌ Failed. Controller busy.", show_alert=True)
+        await callback_query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
         try:
             restore_markup = InlineKeyboardMarkup([[old[0][0], old[0][1]], [InlineKeyboardButton("• GET PERMANENT LINK •", callback_data=f"ia_upload_{msg_id}")], old[2]])
             await callback_query.edit_message_reply_markup(reply_markup=restore_markup)
