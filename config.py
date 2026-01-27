@@ -16,12 +16,11 @@ class Config:
     try: LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
     except: LOG_CHANNEL = 0
 
-    # Log Channel 2 (For Permanent Link logs)
+    # 🆕 Log Channel 2 (For Permanent Link logs)
     try: LOG_CHANNEL_2 = int(os.environ.get("LOG_CHANNEL_2", 0))
     except: LOG_CHANNEL_2 = 0
 
-    # 🆕 Auto-Upload Channels (Supports Multiple! Separated by space or comma)
-    # Example: -100123 -100456
+    # 🆕 Auto-Upload Channels (Space separated list of IDs)
     raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "").replace(",", " ")
     AUTO_UPLOAD_CHANNELS = [int(x) for x in raw_channels.split() if x.lstrip('-').isdigit()]
 
@@ -33,7 +32,17 @@ class Config:
     try: FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", 0))
     except: FORCE_SUB_CHANNEL = 0
         
-    # Controller URL (Medium Worker) - CLEANS THE URL AUTOMATICALLY
+    # ---------------------------------------------------------
+    # 🛡️ BULLETPROOF CONTROLLER LOADER
+    # ---------------------------------------------------------
     raw_worker_urls = os.environ.get("HF_WORKER_URLS", "")
-    HF_WORKERS = [url.strip().rstrip('/') for url in raw_worker_urls.split(",") if url.strip()]
+    if not raw_worker_urls:
+        raw_worker_urls = os.environ.get("HF_WORKERS", "")
     
+    HF_WORKERS = [url.strip().rstrip('/') for url in raw_worker_urls.split(",") if url.strip()]
+
+    if not HF_WORKERS:
+        print("❌ CRITICAL: No Controller URL found in Env Vars!")
+    else:
+        print(f"✅ Config Loaded Controller: {HF_WORKERS}")
+        
