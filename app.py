@@ -167,7 +167,8 @@ async def scan_channels_periodically():
         except Exception as e:
             print(f"Scanner Error: {e}")
         
-        await # =====================================================================================
+        await asyncio.sleep(60)
+      # =====================================================================================
 # --- SETUP, LOGGING & STARTUP ---
 # =====================================================================================
 
@@ -265,106 +266,7 @@ async def send_log(user, file_name, file_size, stream_link, dl_link):
                f"📂 <b>File:</b> {file_name}\n📦 <b>Size:</b> {file_size}\n\n🔗 <b>Stream:</b> {stream_link}\n🔗 <b>DL:</b> {dl_link}")
     try: await bot.send_message(Config.LOG_CHANNEL, log_msg, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
     except: pass
-        asyncio.sleep(60)
-    # =====================================================================================
-# --- SETUP, LOGGING & STARTUP ---
 # =====================================================================================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await db.connect()
-    try:
-        await bot.start()
-        me = await bot.get_me()
-        Config.BOT_USERNAME = me.username
-        print(f"✅ Bot Started: @{Config.BOT_USERNAME}")
-
-        multi_clients[0] = bot
-        work_loads[0] = 0
-        await initialize_clients()
-        
-        # Start Background Tasks
-        asyncio.create_task(poll_controller_queue())
-        asyncio.create_task(scan_channels_periodically())
-        
-        if Config.LOG_CHANNEL:
-            try: await bot.send_message(Config.LOG_CHANNEL, "🟢 **Bot Online & Scanning**")
-            except: pass
-
-    except Exception as e:
-        print(f"Startup Error: {e}")
-    
-    yield
-    if bot.is_initialized: await bot.stop()
-    await db.disconnect()
-
-app = FastAPI(lifespan=lifespan)
-templates = Jinja2Templates(directory="templates")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class HideDLFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "GET /dl/" not in record.getMessage()
-
-logging.getLogger("uvicorn.access").addFilter(HideDLFilter())
-
-bot = Client(
-    "SimpleStreamBot", 
-    api_id=Config.API_ID, 
-    api_hash=Config.API_HASH, 
-    bot_token=Config.BOT_TOKEN, 
-    in_memory=True
-)
-
-multi_clients = {}
-work_loads = {}
-class_cache = {}
-
-class TokenParser:
-    @staticmethod
-    def parse_from_env():
-        return {c + 1: t for c, (_, t) in enumerate(filter(lambda n: n[0].startswith("MULTI_TOKEN"), sorted(os.environ.items())))}
-
-async def start_client(client_id, bot_token):
-    try:
-        client = await Client(name=str(client_id), api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=bot_token, no_updates=True, in_memory=True).start()
-        work_loads[client_id] = 0
-        multi_clients[client_id] = client
-    except Exception: pass
-
-async def initialize_clients():
-    tokens = TokenParser.parse_from_env()
-    if tokens: await asyncio.gather(*[start_client(i, t) for i, t in tokens.items()])
-
-def get_readable_file_size(size_in_bytes):
-    if not size_in_bytes: return '0B'
-    power = 1024
-    n = 0
-    power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB'}
-    while size_in_bytes >= power and n < len(power_labels) - 1:
-        size_in_bytes /= power
-        n += 1
-    return f"{size_in_bytes:.2f} {power_labels[n]}"
-
-def mask_filename(name: str):
-    if not name: return "Protected File"
-    base, ext = os.path.splitext(name)
-    return f"{base[:10]}...{ext}"
-
-async def send_log(user, file_name, file_size, stream_link, dl_link):
-    if not Config.LOG_CHANNEL: return
-    log_msg = (f"<b>#NEW_FILE</b>\n\n👤 <b>User:</b> <a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
-               f"📂 <b>File:</b> {file_name}\n📦 <b>Size:</b> {file_size}\n\n🔗 <b>Stream:</b> {stream_link}\n🔗 <b>DL:</b> {dl_link}")
-    try: await bot.send_message(Config.LOG_CHANNEL, log_msg, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
-    except: pass
-        # =====================================================================================
 # --- ADMIN COMMANDS, DEBUG & AUTO-UPLOAD ---
 # =====================================================================================
 
@@ -461,7 +363,7 @@ async def dispatch_background(url, payload):
             requests.post(f"{url}/upload", json=payload, timeout=5)
             return 
         except: await asyncio.sleep(2)
-        # =====================================================================================
+    # =====================================================================================
 # --- BOT HANDLERS & WEB SERVER ---
 # =====================================================================================
 
