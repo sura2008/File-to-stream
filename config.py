@@ -16,13 +16,14 @@ class Config:
     try: LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
     except: LOG_CHANNEL = 0
 
-    # 🆕 Log Channel 2 (For Permanent Link logs)
+    # Log Channel 2 (For Permanent Link logs)
     try: LOG_CHANNEL_2 = int(os.environ.get("LOG_CHANNEL_2", 0))
     except: LOG_CHANNEL_2 = 0
 
-    # 🆕 Auto-Upload Channel (Bot monitors this)
-    try: AUTO_UPLOAD_CHANNEL = int(os.environ.get("AUTO_UPLOAD_CHANNEL", 0))
-    except: AUTO_UPLOAD_CHANNEL = 0
+    # 🆕 Auto-Upload Channels (Supports Multiple! Separated by space or comma)
+    # Example: -100123 -100456
+    raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "").replace(",", " ")
+    AUTO_UPLOAD_CHANNELS = [int(x) for x in raw_channels.split() if x.lstrip('-').isdigit()]
 
     ADMINS = [int(x) for x in os.environ.get("ADMINS", "").split()]
 
@@ -32,6 +33,7 @@ class Config:
     try: FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", 0))
     except: FORCE_SUB_CHANNEL = 0
         
-    # Controller URL (Medium Worker)
-    HF_WORKERS = os.environ.get("HF_WORKER_URLS", "").split(",")
+    # Controller URL (Medium Worker) - CLEANS THE URL AUTOMATICALLY
+    raw_worker_urls = os.environ.get("HF_WORKER_URLS", "")
+    HF_WORKERS = [url.strip().rstrip('/') for url in raw_worker_urls.split(",") if url.strip()]
     
