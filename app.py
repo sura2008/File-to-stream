@@ -30,7 +30,7 @@ from database import db
 # --- BACKGROUND TASKS (POLLER + SCANNER) ---
 # =====================================================================================
 
-# 1. Poll Controller for Finished Links (Fixes Infinite Loop)
+# 1. Poll Controller for Finished Links (Fixes Infinite Loop & Log Channel 2)
 async def poll_controller_queue():
     if not Config.HF_WORKERS:
         print("⚠️ No Controller URL configured. Polling disabled.")
@@ -38,7 +38,7 @@ async def poll_controller_queue():
 
     CONTROLLER_URL = Config.HF_WORKERS[0]
     print(f"🔄 Connected to Controller: {CONTROLLER_URL}")
-    print("🚀 Polling set to 15 seconds...")
+    print(f"📋 Monitoring Channels for Auto-Upload: {Config.AUTO_UPLOAD_CHANNELS}")
     
     VIEWER_BASE = "https://v0-file-opener-video-player.vercel.app/view?value="
 
@@ -76,6 +76,7 @@ async def poll_controller_queue():
                             # 🟢 CASE 1: AUTO-UPLOAD CHANNELS (Edit Post)
                             if chat_id in Config.AUTO_UPLOAD_CHANNELS:
                                 try:
+                                    print(f"🔄 Editing Channel Post {chat_id}:{message_id}")
                                     original_msg = await bot.get_messages(chat_id, message_id)
                                     existing_caption = original_msg.caption or ""
                                     
@@ -121,7 +122,7 @@ async def poll_controller_queue():
                                     reply_markup=buttons
                                 )
 
-                                # 📝 LOG TO CHANNEL 2
+                                # 📝 LOG TO CHANNEL 2 (Explicit Debugging)
                                 if Config.LOG_CHANNEL_2:
                                     try:
                                         user_link = f"<a href='tg://user?id={chat_id}'>{chat_id}</a>"
@@ -132,8 +133,9 @@ async def poll_controller_queue():
                                             f"🔗 <b>Link:</b> {final_viewer_link}"
                                         )
                                         await bot.send_message(Config.LOG_CHANNEL_2, log_text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
+                                        print(f"✅ Log sent to {Config.LOG_CHANNEL_2}")
                                     except Exception as e:
-                                        print(f"Log Error: {e}")
+                                        print(f"❌ Failed to send Log Channel 2: {e}")
 
                             # Add to list of completed messages
                             sent_ids.append(msg['id'])
@@ -146,10 +148,15 @@ async def poll_controller_queue():
                         try:
                             ack_payload = {"message_ids": sent_ids}
                             ack_resp = await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/donebotmessages", json=ack_payload, timeout=10)
+                            if ack_resp.status_code == 200:
+                                print(f"✅ Confirmed {len(sent_ids)} msgs done.")
+                            else:
+                                print(f"⚠️ Controller ACK Failed: {ack_resp.status_code}")
                         except Exception as e:
                             print(f"❌ Controller ACK Connection Error: {e}")
         
         except Exception as e: 
+            # print(f"Poller Loop Error: {e}")
             pass
         
         await asyncio.sleep(15)
@@ -157,24 +164,27 @@ async def poll_controller_queue():
 # 2. Channel Scanner (Runs every 60s)
 async def scan_channels_periodically():
     if not Config.AUTO_UPLOAD_CHANNELS or not Config.HF_WORKERS:
+        print("⚠️ Scanner disabled (Missing Channels or Controller)")
         return
 
-    print("🕵️ Started Channel Scanner")
+    print(f"🕵️ Started Channel Scanner for: {Config.AUTO_UPLOAD_CHANNELS}")
     while True:
         try:
             for chat_id in Config.AUTO_UPLOAD_CHANNELS:
                 async for message in bot.get_chat_history(chat_id, limit=5):
                     if message.media and not message.video_note and not message.sticker:
                         caption = message.caption or ""
+                        # Only upload if NOT already processed
                         if "Here is 👉👉" not in caption:
                             print(f"⚡ Found Missed File in {chat_id}: {message.id}")
+                            # Call the handler directly
                             await auto_channel_handler(bot, message)
                             await asyncio.sleep(5) 
         except Exception as e:
             print(f"Scanner Error: {e}")
         
         await asyncio.sleep(60)
-# =====================================================================================
+     # =====================================================================================
 # --- SETUP & HELPERS ---
 # =====================================================================================
 
@@ -335,7 +345,9 @@ async def stats_command(client, message):
 @bot.on_message(filters.chat(Config.AUTO_UPLOAD_CHANNELS) & (filters.document | filters.video | filters.audio))
 async def auto_channel_handler(client, message):
     # Only process if configured
-    if not Config.HF_WORKERS: return
+    if not Config.HF_WORKERS: 
+        print("❌ Auto-Upload Ignored: No Controller.")
+        return
     
     # Avoid processing duplicate/edited messages that already have the link
     if message.caption and "Here is 👉👉" in message.caption:
@@ -344,11 +356,13 @@ async def auto_channel_handler(client, message):
     CONTROLLER_URL = Config.HF_WORKERS[0]
     media = message.document or message.video or message.audio
     
+    print(f"⚡ Auto-Upload Triggered for: {message.chat.id} -> {media.file_name}")
+    
     try:
         # Copy to storage to get a permanent file ID for the stream link
         stored = await message.copy(Config.STORAGE_CHANNEL)
     except Exception as e:
-        print(f"Storage Copy Failed (Bot not admin in Storage?): {e}")
+        print(f"❌ Storage Copy Failed (Bot not admin in Storage?): {e}")
         return 
     
     safe_name = "".join(c for c in (media.file_name or "vid.mp4") if c.isalnum() or c in ('.', '_', '-')).rstrip()
@@ -372,9 +386,10 @@ async def dispatch_background(url, payload):
             if res.status_code == 200:
                 print(f"✅ Auto-Upload Dispatched for {payload['file_name']}")
                 return 
-        except: 
+        except Exception as e: 
+            print(f"❌ Dispatch Fail: {e}")
             await asyncio.sleep(2)
-    # =====================================================================================
+   # =====================================================================================
 # --- BOT HANDLERS & WEB SERVER ---
 # =====================================================================================
 
@@ -588,4 +603,4 @@ async def stream_media(req: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-    
+        
