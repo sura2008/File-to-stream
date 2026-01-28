@@ -12,17 +12,21 @@ class Config:
     try: STORAGE_CHANNEL = int(os.environ.get("STORAGE_CHANNEL", 0))
     except: STORAGE_CHANNEL = 0
     
-    # Log Channel 1 (For Stream/Download logs)
+    # Log Channel 1 (Stream/Download Logs)
     try: LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
     except: LOG_CHANNEL = 0
 
-    # 🆕 Log Channel 2 (For Permanent Link logs)
+    # 🆕 Log Channel 2 (Permanent Link Logs)
     try: LOG_CHANNEL_2 = int(os.environ.get("LOG_CHANNEL_2", 0))
     except: LOG_CHANNEL_2 = 0
 
-    # 🆕 Auto-Upload Channels (Space separated list of IDs)
+    # 🆕 Auto-Upload Channels (Parses "-100xx -100yy" or "-100xx,-100yy")
     raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "").replace(",", " ")
-    AUTO_UPLOAD_CHANNELS = [int(x) for x in raw_channels.split() if x.lstrip('-').isdigit()]
+    AUTO_UPLOAD_CHANNELS = []
+    for x in raw_channels.split():
+        clean_x = x.strip()
+        if clean_x.lstrip('-').isdigit():
+            AUTO_UPLOAD_CHANNELS.append(int(clean_x))
 
     ADMINS = [int(x) for x in os.environ.get("ADMINS", "").split()]
 
@@ -32,15 +36,16 @@ class Config:
     try: FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", 0))
     except: FORCE_SUB_CHANNEL = 0
         
-    # ---------------------------------------------------------
-    # 🛡️ BULLETPROOF CONTROLLER LOADER
-    # ---------------------------------------------------------
+    # 🛡️ CONTROLLER LOADER
+    # Checks HF_WORKER_URLS, HF_WORKER_URL, and HF_WORKERS
     raw_worker_urls = os.environ.get("HF_WORKER_URLS", "")
     if not raw_worker_urls:
-        raw_worker_urls = os.environ.get("HF_WORKERS", "")
+        raw_worker_urls = os.environ.get("HF_WORKER_URL", "") # Fallback singular
+    if not raw_worker_urls:
+        raw_worker_urls = os.environ.get("HF_WORKERS", "") # Fallback old name
     
     HF_WORKERS = [url.strip().rstrip('/') for url in raw_worker_urls.split(",") if url.strip()]
-
+    
     if not HF_WORKERS:
         print("❌ CRITICAL: No Controller URL found in Env Vars!")
     else:
