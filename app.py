@@ -30,7 +30,7 @@ from database import db
 # --- BACKGROUND TASKS (POLLER + SCANNER) ---
 # =====================================================================================
 
-# 1. Poll Controller for Finished Links
+# 1. Poll Controller for Finished Links (Fixes Infinite Loop)
 async def poll_controller_queue():
     if not Config.HF_WORKERS:
         print("⚠️ No Controller URL configured. Polling disabled.")
@@ -52,7 +52,8 @@ async def poll_controller_queue():
                 messages = data.get("messages", [])
 
                 if messages:
-                    sent_ids = []
+                    sent_ids = [] # IDs to mark as done
+                    
                     for msg in messages:
                         try:
                             # Parse Link
@@ -78,7 +79,6 @@ async def poll_controller_queue():
                                     original_msg = await bot.get_messages(chat_id, message_id)
                                     existing_caption = original_msg.caption or ""
                                     
-                                    # Avoid double editing
                                     if "Here is 👉👉" not in existing_caption:
                                         new_caption = (
                                             f"{existing_caption}\n\n"
@@ -101,7 +101,7 @@ async def poll_controller_queue():
                                 except Exception as e:
                                     print(f"❌ Failed to edit channel post: {e}")
 
-                            # 🔵 CASE 2: PRIVATE USER (Send & Log to Channel 2)
+                            # 🔵 CASE 2: PRIVATE USER (Send & Log)
                             else:
                                 result_text = (
                                     f"✅ <b>Permanent Link Ready!</b>\n\n"
@@ -123,53 +123,59 @@ async def poll_controller_queue():
 
                                 # 📝 LOG TO CHANNEL 2
                                 if Config.LOG_CHANNEL_2:
-                                    user_link = f"<a href='tg://user?id={chat_id}'>{chat_id}</a>"
-                                    log_text = (
-                                        f"<b>#PERMANENT_LINK_GENERATED</b>\n\n"
-                                        f"👤 <b>User:</b> {user_link}\n"
-                                        f"📂 <b>File:</b> {filename}\n"
-                                        f"🔗 <b>Link:</b> {final_viewer_link}"
-                                    )
-                                    await bot.send_message(Config.LOG_CHANNEL_2, log_text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
+                                    try:
+                                        user_link = f"<a href='tg://user?id={chat_id}'>{chat_id}</a>"
+                                        log_text = (
+                                            f"<b>#PERMANENT_LINK_GENERATED</b>\n\n"
+                                            f"👤 <b>User:</b> {user_link}\n"
+                                            f"📂 <b>File:</b> {filename}\n"
+                                            f"🔗 <b>Link:</b> {final_viewer_link}"
+                                        )
+                                        await bot.send_message(Config.LOG_CHANNEL_2, log_text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
+                                    except Exception as e:
+                                        print(f"Log Error: {e}")
 
+                            # Add to list of completed messages
                             sent_ids.append(msg['id'])
                             await asyncio.sleep(0.5) 
                         except Exception as e:
-                            print(f"❌ Failed to send to {msg.get('chat_id')}: {e}")
+                            print(f"❌ Processing Message Error: {e}")
 
-                    # Tell Controller we delivered these messages
+                    # 🔥 CRITICAL FIX: Tell Controller to DELETE these messages
                     if sent_ids:
-                        payload = {"message_ids": sent_ids}
-                        await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/donebotmessages", json=payload, timeout=10)
+                        try:
+                            ack_payload = {"message_ids": sent_ids}
+                            ack_resp = await asyncio.to_thread(requests.post, f"{CONTROLLER_URL}/donebotmessages", json=ack_payload, timeout=10)
+                        except Exception as e:
+                            print(f"❌ Controller ACK Connection Error: {e}")
         
-        except Exception: 
+        except Exception as e: 
             pass
         
         await asyncio.sleep(15)
 
-# 2. 🆕 CHANNEL SCANNER (Runs every 60s)
+# 2. Channel Scanner (Runs every 60s)
 async def scan_channels_periodically():
     if not Config.AUTO_UPLOAD_CHANNELS or not Config.HF_WORKERS:
         return
 
-    print("🕵️ Started Channel Scanner (Every 60s)")
+    print("🕵️ Started Channel Scanner")
     while True:
         try:
             for chat_id in Config.AUTO_UPLOAD_CHANNELS:
-                # Check last 10 messages
-                async for message in bot.get_chat_history(chat_id, limit=10):
+                async for message in bot.get_chat_history(chat_id, limit=5):
                     if message.media and not message.video_note and not message.sticker:
                         caption = message.caption or ""
                         if "Here is 👉👉" not in caption:
                             print(f"⚡ Found Missed File in {chat_id}: {message.id}")
                             await auto_channel_handler(bot, message)
-                            await asyncio.sleep(2) 
+                            await asyncio.sleep(5) 
         except Exception as e:
             print(f"Scanner Error: {e}")
         
         await asyncio.sleep(60)
-      # =====================================================================================
-# --- SETUP, LOGGING & STARTUP ---
+# =====================================================================================
+# --- SETUP & HELPERS ---
 # =====================================================================================
 
 @asynccontextmanager
@@ -185,7 +191,6 @@ async def lifespan(app: FastAPI):
         work_loads[0] = 0
         await initialize_clients()
         
-        # Start Background Tasks
         asyncio.create_task(poll_controller_queue())
         asyncio.create_task(scan_channels_periodically())
         
@@ -270,21 +275,20 @@ async def send_log(user, file_name, file_size, stream_link, dl_link):
 # --- ADMIN COMMANDS, DEBUG & AUTO-UPLOAD ---
 # =====================================================================================
 
-# 🆕 DEBUG COMMAND
 @bot.on_message(filters.command("debug") & filters.user(Config.ADMINS))
 async def debug_command(client, message):
-    raw_env = os.environ.get("HF_WORKER_URLS", "Not Found")
-    loaded_config = Config.HF_WORKERS
+    raw_env = os.environ.get("HF_WORKER_URLS", "")
+    if not raw_env: raw_env = os.environ.get("HF_WORKER_URL", "Not Found")
     
     debug_text = (
         f"🛠 <b>DIAGNOSTIC REPORT</b>\n\n"
         f"1️⃣ <b>Raw Env:</b>\n<code>{raw_env}</code>\n\n"
-        f"2️⃣ <b>Loaded Controller:</b>\n<code>{loaded_config}</code>\n\n"
-        f"3️⃣ <b>Auto Channels:</b>\n<code>{Config.AUTO_UPLOAD_CHANNELS}</code>"
+        f"2️⃣ <b>Loaded Controller:</b>\n<code>{Config.HF_WORKERS}</code>\n\n"
+        f"3️⃣ <b>Auto Channels:</b>\n<code>{Config.AUTO_UPLOAD_CHANNELS}</code>\n\n"
+        f"4️⃣ <b>Log Channel 2:</b>\n<code>{Config.LOG_CHANNEL_2}</code>"
     )
     await message.reply(debug_text, parse_mode=enums.ParseMode.HTML)
 
-# 🆕 BROADCAST
 @bot.on_message(filters.command("all") & filters.user(Config.ADMINS))
 async def broadcast_handler(client, message):
     if len(message.command) < 2: return await message.reply("Usage: `/all Hello`")
@@ -330,9 +334,10 @@ async def stats_command(client, message):
 # 🆕 AUTO-UPLOAD LISTENER
 @bot.on_message(filters.chat(Config.AUTO_UPLOAD_CHANNELS) & (filters.document | filters.video | filters.audio))
 async def auto_channel_handler(client, message):
+    # Only process if configured
     if not Config.HF_WORKERS: return
     
-    # Check if already processed
+    # Avoid processing duplicate/edited messages that already have the link
     if message.caption and "Here is 👉👉" in message.caption:
         return
 
@@ -340,9 +345,10 @@ async def auto_channel_handler(client, message):
     media = message.document or message.video or message.audio
     
     try:
+        # Copy to storage to get a permanent file ID for the stream link
         stored = await message.copy(Config.STORAGE_CHANNEL)
     except Exception as e:
-        print(f"Storage Copy Failed: {e}")
+        print(f"Storage Copy Failed (Bot not admin in Storage?): {e}")
         return 
     
     safe_name = "".join(c for c in (media.file_name or "vid.mp4") if c.isalnum() or c in ('.', '_', '-')).rstrip()
@@ -355,14 +361,19 @@ async def auto_channel_handler(client, message):
         "message_id": message.id 
     }
     
+    # Send to Controller (Background)
     asyncio.create_task(dispatch_background(CONTROLLER_URL, payload))
 
 async def dispatch_background(url, payload):
+    # Retry 3 times
     for _ in range(3):
         try:
-            requests.post(f"{url}/upload", json=payload, timeout=5)
-            return 
-        except: await asyncio.sleep(2)
+            res = requests.post(f"{url}/upload", json=payload, timeout=5)
+            if res.status_code == 200:
+                print(f"✅ Auto-Upload Dispatched for {payload['file_name']}")
+                return 
+        except: 
+            await asyncio.sleep(2)
     # =====================================================================================
 # --- BOT HANDLERS & WEB SERVER ---
 # =====================================================================================
