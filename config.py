@@ -21,12 +21,16 @@ class Config:
     except: LOG_CHANNEL_2 = 0
 
     # 🆕 Auto-Upload Channels (Parses "-100xx -100yy" or "-100xx,-100yy")
-    raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "").replace(",", " ")
+    raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "")
+    if not raw_channels:
+        raw_channels = os.environ.get("AUTO_UPLOAD_CHANNEL", "") # Fallback singular
+    
     AUTO_UPLOAD_CHANNELS = []
-    for x in raw_channels.split():
-        clean_x = x.strip()
-        if clean_x.lstrip('-').isdigit():
-            AUTO_UPLOAD_CHANNELS.append(int(clean_x))
+    if raw_channels:
+        for x in raw_channels.replace(",", " ").split():
+            clean_x = x.strip()
+            if clean_x.lstrip('-').isdigit():
+                AUTO_UPLOAD_CHANNELS.append(int(clean_x))
 
     ADMINS = [int(x) for x in os.environ.get("ADMINS", "").split()]
 
@@ -50,4 +54,6 @@ class Config:
         print("❌ CRITICAL: No Controller URL found in Env Vars!")
     else:
         print(f"✅ Config Loaded Controller: {HF_WORKERS}")
+        print(f"✅ Auto-Upload Channels: {AUTO_UPLOAD_CHANNELS}")
+        print(f"✅ Log Channel 2: {LOG_CHANNEL_2}")
         
