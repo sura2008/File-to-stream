@@ -8,23 +8,18 @@ class Config:
     API_HASH = os.environ.get("API_HASH", "")
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     
-    # Storage Channel (Files are copied here)
+    # Storage & Log Channels
     try: STORAGE_CHANNEL = int(os.environ.get("STORAGE_CHANNEL", 0))
     except: STORAGE_CHANNEL = 0
     
-    # Log Channel 1 (Stream/Download Logs)
     try: LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
     except: LOG_CHANNEL = 0
-
-    # 🆕 Log Channel 2 (Permanent Link Logs)
+    
     try: LOG_CHANNEL_2 = int(os.environ.get("LOG_CHANNEL_2", 0))
     except: LOG_CHANNEL_2 = 0
 
-    # 🆕 Auto-Upload Channels (Parses "-100xx -100yy" or "-100xx,-100yy")
+    # Auto-Upload Channels
     raw_channels = os.environ.get("AUTO_UPLOAD_CHANNELS", "")
-    if not raw_channels:
-        raw_channels = os.environ.get("AUTO_UPLOAD_CHANNEL", "") # Fallback singular
-    
     AUTO_UPLOAD_CHANNELS = []
     if raw_channels:
         for x in raw_channels.replace(",", " ").split():
@@ -40,20 +35,31 @@ class Config:
     try: FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", 0))
     except: FORCE_SUB_CHANNEL = 0
         
-    # 🛡️ CONTROLLER LOADER
-    # Checks HF_WORKER_URLS, HF_WORKER_URL, and HF_WORKERS
-    raw_worker_urls = os.environ.get("HF_WORKER_URLS", "")
-    if not raw_worker_urls:
-        raw_worker_urls = os.environ.get("HF_WORKER_URL", "") # Fallback singular
-    if not raw_worker_urls:
-        raw_worker_urls = os.environ.get("HF_WORKERS", "") # Fallback old name
+    # ---------------------------------------------------------
+    # 🔄 CONTROLLER (For File Uploading / Auto-Upload)
+    # ---------------------------------------------------------
+    # Kept your original variable name for backward compatibility
+    raw_upload_urls = os.environ.get("HF_WORKERS", "") 
+    HF_UPLOAD_WORKERS = [url.strip().rstrip('/') for url in raw_upload_urls.split(",") if url.strip()]
+
+    # ---------------------------------------------------------
+    # 🚀 STREAMING WORKERS (For File Streaming / Download) [NEW]
+    # ---------------------------------------------------------
+    # Renamed to avoid conflict. Set this in Render Env Vars.
+    raw_stream_urls = os.environ.get("HF_STREAMING_URLS", "")
+    if not raw_stream_urls:
+        raw_stream_urls = os.environ.get("HF_STREAMING_WORKER", "") # Singular fallback
+        
+    HF_STREAMING_URLS = [url.strip().rstrip('/') for url in raw_stream_urls.split(",") if url.strip()]
     
-    HF_WORKERS = [url.strip().rstrip('/') for url in raw_worker_urls.split(",") if url.strip()]
-    
-    if not HF_WORKERS:
-        print("❌ CRITICAL: No Controller URL found in Env Vars!")
+    # 🔍 Debugging Prints
+    if not HF_UPLOAD_WORKERS:
+        print("⚠️ Config: No Upload Controller found (HF_WORKERS). Auto-upload disabled.")
     else:
-        print(f"✅ Config Loaded Controller: {HF_WORKERS}")
-        print(f"✅ Auto-Upload Channels: {AUTO_UPLOAD_CHANNELS}")
-        print(f"✅ Log Channel 2: {LOG_CHANNEL_2}")
+        print(f"✅ Config: Upload Controllers Loaded: {len(HF_UPLOAD_WORKERS)}")
+
+    if not HF_STREAMING_URLS:
+        print("⚠️ Config: No Streaming Workers found (HF_STREAMING_URLS). Using Render fallback.")
+    else:
+        print(f"✅ Config: Streaming Workers Loaded: {len(HF_STREAMING_URLS)}")
         
