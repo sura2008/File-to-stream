@@ -15,9 +15,9 @@ from contextlib import asynccontextmanager
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated, CallbackQuery
 from pyrogram.errors import FloodWait, UserNotParticipant
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pyrogram.file_id import FileId
 from pyrogram import raw
@@ -32,12 +32,13 @@ from database import db
 
 # 1. Poll Controller for Finished Links (Fixes Infinite Loop & Log Channel 2)
 async def poll_controller_queue():
-    if not Config.HF_WORKERS:
-        print("⚠️ No Controller URL configured. Polling disabled.")
+    # Use the UPLOAD workers for this task (Controller logic)
+    if not Config.HF_UPLOAD_WORKERS:
+        print("⚠️ No Upload Controller (HF_WORKERS) configured. Polling disabled.")
         return
 
-    CONTROLLER_URL = Config.HF_WORKERS[0]
-    print(f"🔄 Connected to Controller: {CONTROLLER_URL}")
+    CONTROLLER_URL = Config.HF_UPLOAD_WORKERS[0]
+    print(f"🔄 Connected to Upload Controller: {CONTROLLER_URL}")
     print(f"📋 Monitoring Channels for Auto-Upload: {Config.AUTO_UPLOAD_CHANNELS}")
     
     VIEWER_BASE = "https://v0-file-opener-video-player.vercel.app/view?value="
@@ -163,8 +164,8 @@ async def poll_controller_queue():
 
 # 2. Channel Scanner (Runs every 60s)
 async def scan_channels_periodically():
-    if not Config.AUTO_UPLOAD_CHANNELS or not Config.HF_WORKERS:
-        print("⚠️ Scanner disabled (Missing Channels or Controller)")
+    if not Config.AUTO_UPLOAD_CHANNELS or not Config.HF_UPLOAD_WORKERS:
+        print("⚠️ Scanner disabled (Missing Channels or Upload Controller)")
         return
 
     print(f"🕵️ Started Channel Scanner for: {Config.AUTO_UPLOAD_CHANNELS}")
@@ -184,7 +185,7 @@ async def scan_channels_periodically():
             print(f"Scanner Error: {e}")
         
         await asyncio.sleep(60)
-     # =====================================================================================
+# =====================================================================================
 # --- SETUP & HELPERS ---
 # =====================================================================================
 
@@ -281,19 +282,16 @@ async def send_log(user, file_name, file_size, stream_link, dl_link):
                f"📂 <b>File:</b> {file_name}\n📦 <b>Size:</b> {file_size}\n\n🔗 <b>Stream:</b> {stream_link}\n🔗 <b>DL:</b> {dl_link}")
     try: await bot.send_message(Config.LOG_CHANNEL, log_msg, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
     except: pass
-# =====================================================================================
+      # =====================================================================================
 # --- ADMIN COMMANDS, DEBUG & AUTO-UPLOAD ---
 # =====================================================================================
 
 @bot.on_message(filters.command("debug") & filters.user(Config.ADMINS))
 async def debug_command(client, message):
-    raw_env = os.environ.get("HF_WORKER_URLS", "")
-    if not raw_env: raw_env = os.environ.get("HF_WORKER_URL", "Not Found")
-    
     debug_text = (
         f"🛠 <b>DIAGNOSTIC REPORT</b>\n\n"
-        f"1️⃣ <b>Raw Env:</b>\n<code>{raw_env}</code>\n\n"
-        f"2️⃣ <b>Loaded Controller:</b>\n<code>{Config.HF_WORKERS}</code>\n\n"
+        f"1️⃣ <b>Upload Workers (Controller):</b>\n<code>{Config.HF_UPLOAD_WORKERS}</code>\n\n"
+        f"2️⃣ <b>Streaming Workers (Download):</b>\n<code>{Config.HF_STREAMING_URLS}</code>\n\n"
         f"3️⃣ <b>Auto Channels:</b>\n<code>{Config.AUTO_UPLOAD_CHANNELS}</code>\n\n"
         f"4️⃣ <b>Log Channel 2:</b>\n<code>{Config.LOG_CHANNEL_2}</code>"
     )
@@ -345,15 +343,15 @@ async def stats_command(client, message):
 @bot.on_message(filters.chat(Config.AUTO_UPLOAD_CHANNELS) & (filters.document | filters.video | filters.audio))
 async def auto_channel_handler(client, message):
     # Only process if configured
-    if not Config.HF_WORKERS: 
-        print("❌ Auto-Upload Ignored: No Controller.")
+    if not Config.HF_UPLOAD_WORKERS: 
+        print("❌ Auto-Upload Ignored: No Upload Controller.")
         return
     
     # Avoid processing duplicate/edited messages that already have the link
     if message.caption and "Here is 👉👉" in message.caption:
         return
 
-    CONTROLLER_URL = Config.HF_WORKERS[0]
+    CONTROLLER_URL = Config.HF_UPLOAD_WORKERS[0]
     media = message.document or message.video or message.audio
     
     print(f"⚡ Auto-Upload Triggered for: {message.chat.id} -> {media.file_name}")
@@ -366,6 +364,9 @@ async def auto_channel_handler(client, message):
         return 
     
     safe_name = "".join(c for c in (media.file_name or "vid.mp4") if c.isalnum() or c in ('.', '_', '-')).rstrip()
+    
+    # NOTE: For auto-upload, we generate a generic stream link. 
+    # The Controller will later enhance it or you can change this logic to use stateless links too.
     stream_link = f"{Config.BASE_URL}/dl/{stored.id}/{safe_name}"
     
     payload = {
@@ -389,8 +390,8 @@ async def dispatch_background(url, payload):
         except Exception as e: 
             print(f"❌ Dispatch Fail: {e}")
             await asyncio.sleep(2)
-   # =====================================================================================
-# --- BOT HANDLERS & WEB SERVER ---
+    # =====================================================================================
+# --- BOT HANDLERS (USER SIDE) ---
 # =====================================================================================
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -415,12 +416,14 @@ async def start_command(client: Client, message: Message):
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file_upload(client: Client, message: Message):
+    # 1. User & Ban Check
     await db.add_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
     if await db.is_user_banned(message.from_user.id):
         await message.reply("🚫 <b>You are banned.</b>")
         return
 
     try:
+        # 2. Copy to Storage Channel
         sent_message = await message.copy(chat_id=Config.STORAGE_CHANNEL)
         unique_id = secrets.token_urlsafe(8)
         await db.save_link(unique_id, sent_message.id)
@@ -429,21 +432,46 @@ async def handle_file_upload(client: Client, message: Message):
         file_name = media.file_name or "Unknown_File"
         file_size = get_readable_file_size(media.file_size)
         
-        stream_link = f"{Config.BASE_URL}/show/{unique_id}"
-        render_dl_link = f"{Config.BASE_URL}/dl/{sent_message.id}/{file_name.replace(' ', '_')}"
-        render_base64 = base64.b64encode(render_dl_link.encode('ascii')).decode('ascii')
-        opener_link = f"https://v0-file-opener-video-player.vercel.app/view?value={render_base64}"
+        # ==================================================================
+        # 🚀 NEW LOGIC: Use HF_STREAMING_URLS (Bandwidth Offload)
+        # ==================================================================
         
-        asyncio.create_task(send_log(message.from_user, file_name, file_size, opener_link, render_dl_link))
+        # A. Select a STREAMING Worker (Not an Upload Worker)
+        if Config.HF_STREAMING_URLS:
+            worker_url = random.choice(Config.HF_STREAMING_URLS)
+        else:
+            print("⚠️ No Streaming Worker! Using Render URL.")
+            worker_url = Config.BASE_URL 
+            
+        # B. Create the Direct Stream Link
+        # Format: https://hf-streaming-space.hf.space/stream/{message_id}/{filename}
+        safe_name = file_name.replace(' ', '_')
+        hf_direct_link = f"{worker_url}/stream/{sent_message.id}/{safe_name}"
+        
+        # C. Encode to Base64 for Vercel
+        hf_base64 = base64.b64encode(hf_direct_link.encode('utf-8')).decode('utf-8')
+        
+        # D. Final Links
+        opener_link = f"https://v0-file-opener-video-player.vercel.app/view?value={hf_base64}"
+        stream_link = f"{Config.BASE_URL}/show/{unique_id}" 
+        
+        # ==================================================================
 
+        # 3. Log
+        asyncio.create_task(send_log(message.from_user, file_name, file_size, opener_link, hf_direct_link))
+
+        # 4. Reply
         response_text = (
-            f"<b><u>Your Link Generated !</u></b>\n\n📧 <b>FILE NAME :-</b> <code>{file_name}</code>\n"
-            f"📦 <b>FILE SIZE :-</b> {file_size}\n\n<b><u>Tap To Copy Link</u></b> 👇\n\n"
-            f"🖥 <b>Stream :</b> <code>{stream_link}</code>\n📥 <b>Download :</b> <code>{render_dl_link}</code>\n\n"
-            f"🚸 <b>NOTE : LINK WON'T EXPIRE TILL I DELETE 🤡</b>"
+            f"<b><u>Your Link Generated !</u></b>\n\n"
+            f"📧 <b>FILE NAME :-</b> <code>{file_name}</code>\n"
+            f"📦 <b>FILE SIZE :-</b> {file_size}\n\n"
+            f"<b><u>Tap To Copy Link</u></b> 👇\n\n"
+            f"🖥 <b>Stream :</b> <code>{opener_link}</code>\n"
+            f"📥 <b>Download :</b> <code>{hf_direct_link}</code>\n\n"
+            f"🚸 <b>NOTE : BANDWIDTH MOVED TO EXTERNAL WORKER 🚀</b>"
         )
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("• STREAM •", url=opener_link), InlineKeyboardButton("• DOWNLOAD •", url=render_dl_link)],
+            [InlineKeyboardButton("• STREAM •", url=opener_link), InlineKeyboardButton("• DOWNLOAD •", url=hf_direct_link)],
             [InlineKeyboardButton("• GET PERMANENT LINK •", callback_data=f"ia_upload_{sent_message.id}")],
             [InlineKeyboardButton("• CLOSE •", callback_data="close_data")]
         ])
@@ -461,8 +489,9 @@ async def close_handler(client, callback_query):
 async def ia_upload_handler(client, callback_query):
     if await db.is_user_banned(callback_query.from_user.id): return await callback_query.answer("🚫 You are banned.", show_alert=True)
 
-    if not Config.HF_WORKERS: return await callback_query.answer("❌ Error: No Controller Configured.", show_alert=True)
-    CONTROLLER_URL = Config.HF_WORKERS[0]
+    # Use UPLOAD WORKERS for this task
+    if not Config.HF_UPLOAD_WORKERS: return await callback_query.answer("❌ Error: No Upload Controller Configured.", show_alert=True)
+    CONTROLLER_URL = Config.HF_UPLOAD_WORKERS[0]
 
     try:
         old = callback_query.message.reply_markup.inline_keyboard
@@ -515,7 +544,10 @@ async def ia_upload_handler(client, callback_query):
 @bot.on_callback_query(filters.regex("ignore"))
 async def ignore_callback(client, callback_query): await callback_query.answer("⏳ Processing...", show_alert=True)
 
-# --- WEB SERVER ---
+# =====================================================================================
+# --- WEB SERVER & STREAMING ---
+# =====================================================================================
+
 @app.get("/")
 async def health(): return {"status": "ok"}
 
@@ -567,21 +599,33 @@ class ByteStreamer:
                 else: break
         finally: work_loads[index] -= 1
 
-@app.get("/dl/{mid}/{fname}")
-async def stream_media(req: Request, mid: int, fname: str):
+@app.get("/dl/{msg_id}/{file_name}")
+async def stream_handler(request: Request, msg_id: int, file_name: str):
+    """
+    Standard Streaming Route.
+    1. Tries to redirect to HF_STREAMING_URLS if available (Saves Bandwidth).
+    2. Falls back to Render streaming if no HF worker is set.
+    """
+    # 🚀 OFF-LOAD BANDWIDTH TO HUGGING FACE
+    if Config.HF_STREAMING_URLS:
+        worker_url = random.choice(Config.HF_STREAMING_URLS)
+        final_url = f"{worker_url}/stream/{msg_id}/{file_name}"
+        return RedirectResponse(url=final_url, status_code=307)
+    
+    # ⚠️ FALLBACK: USE RENDER BANDWIDTH (IF NO WORKER CONFIGURED)
     try:
         idx = min(work_loads, key=work_loads.get, default=0)
         client = multi_clients[idx]
         streamer = class_cache.get(client) or ByteStreamer(client)
         class_cache[client] = streamer
         
-        msg = await client.get_messages(Config.STORAGE_CHANNEL, mid)
+        msg = await client.get_messages(Config.STORAGE_CHANNEL, msg_id)
         media = msg.document or msg.video or msg.audio
         if not media: raise FileNotFoundError
         fid = FileId.decode(media.file_id)
         file_size = media.file_size
         
-        range_header = req.headers.get("Range", 0)
+        range_header = request.headers.get("Range", 0)
         from_bytes, until_bytes = 0, file_size - 1
         if range_header:
             s = range_header.replace("bytes=", "").split("-")
@@ -603,4 +647,4 @@ async def stream_media(req: Request, mid: int, fname: str):
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-        
+            
